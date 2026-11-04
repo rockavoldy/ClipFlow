@@ -443,7 +443,6 @@ impl Deck {
                         // the deck is hidden, and it never steals focus. The
                         // in-app status line records the same result.
                         crate::platform::notify::clip_saved(
-                            cx,
                             &outcome.clip.file_name,
                             outcome.clip.duration_seconds,
                             trigger.as_str(),
@@ -468,7 +467,7 @@ impl Deck {
                         } else if e.starts_with("Privacy mode:") {
                             // The exact refusal is actionable, so surface it
                             // verbatim instead of a generic failure.
-                            crate::platform::notify::save_blocked(cx, &e);
+                            crate::platform::notify::save_blocked(&e);
                             deck.status_error("Nothing saved", &e);
                         } else {
                             deck.status_error("Save failed", &e);

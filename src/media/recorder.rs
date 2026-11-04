@@ -522,6 +522,24 @@ impl SharedState {
         *self.state.write() = s;
     }
 
+    /// Re-anchors the engine clock to "now". Called when the engine is armed so
+    /// the audio and video threads share one epoch: the audio thread used to
+    /// inherit the epoch captured when the app process started, which put every
+    /// audio sample minutes into the future relative to the video, broke ring
+    /// pruning (audio was never evicted) and made clips start with silence and
+    /// run past the video.
+    fn reanchor_clock(&self) {
+        let mut now = 0i64;
+        let mut freq = 0i64;
+        unsafe {
+            let _ = windows::Win32::System::Performance::QueryPerformanceCounter(&mut now);
+            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut freq);
+        }
+        self.qpc_origin.store(now, Ordering::Release);
+        self.qpc_freq
+            .store(if freq == 0 { 10_000_000 } else { freq }, Ordering::Release);
+    }
+
     fn fail(&self, msg: impl Into<String>) {
         let msg = msg.into();
         log::error!("[clipflow::recorder] {msg}");
@@ -667,6 +685,8 @@ impl CaptureEngine {
         self.shared.dropped_frames.store(0, Ordering::Relaxed);
         *self.shared.started_at.lock() = Some(Instant::now());
         self.shared.set_state(EngineState::Starting);
+        // Audio and video must share one clock epoch from this point on.
+        self.shared.reanchor_clock();
 
         // Audio first: WASAPI needs a couple of hundred ms to spin up its
         // endpoint, and starting it early keeps A/V aligned from frame zero.
@@ -891,9 +911,7 @@ mod win {
     use windows::Win32::Graphics::Dxgi::*;
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-    use windows::Win32::System::Performance::{
-        QueryPerformanceCounter, QueryPerformanceFrequency,
-    };
+    use windows::Win32::System::Performance::QueryPerformanceCounter;
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::{
         GetCurrentProcess, GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
@@ -938,16 +956,13 @@ mod win {
     }
 
     impl QpcClock {
-        pub fn new() -> Self {
-            let mut freq = 0i64;
-            let mut now = 0i64;
-            unsafe {
-                let _ = QueryPerformanceFrequency(&mut freq);
-                let _ = QueryPerformanceCounter(&mut now);
-            }
+        /// Builds the clock from the epoch the whole engine shares (set when
+        /// the engine was armed). Audio capture is handed the same origin, so
+        /// both timelines start at zero at the same instant.
+        pub fn from_shared(origin: i64, freq: i64) -> Self {
             Self {
-                freq: if freq == 0 { 10_000_000 } else { freq },
-                origin: now,
+                freq: if freq <= 0 { HNS_PER_SECOND } else { freq },
+                origin,
             }
         }
 
@@ -2217,13 +2232,24 @@ float4 PSMain(VSOut i) : SV_Target {
             writer.BeginWriting().map_err(hr)?;
 
             let base_pts = video.first().map(|p| p.pts_hns).unwrap_or(0);
+            let video_end = video
+                .last()
+                .map(|p| p.pts_hns + p.duration_hns)
+                .unwrap_or(base_pts);
             for pkt in video {
                 let sample = make_sample(&pkt.data, pkt.pts_hns - base_pts, pkt.duration_hns, pkt.keyframe)?;
                 writer.WriteSample(vstream, &sample).map_err(hr)?;
             }
             if let Some(s) = astream {
                 for pkt in audio {
-                    // Clamp negative rebased stamps: WriteSample rejects them.
+                    let end = pkt.pts_hns + pkt.duration_hns;
+                    // `WriteSample` rejects negative stamps; clamping several
+                    // pre-roll frames to 0 instead would stack them on one
+                    // timestamp (players stutter/skip). Drop what is wholly
+                    // outside the video, clamp at most the straddling frame.
+                    if end <= base_pts || pkt.pts_hns >= video_end {
+                        continue;
+                    }
                     let t = (pkt.pts_hns - base_pts).max(0);
                     let sample = make_sample(&pkt.data, t, pkt.duration_hns, true)?;
                     writer.WriteSample(s, &sample).map_err(hr)?;
@@ -2306,7 +2332,10 @@ float4 PSMain(VSOut i) : SV_Target {
             }
         };
 
-        let clock = QpcClock::new();
+        let clock = QpcClock::from_shared(
+            shared.qpc_origin.load(Ordering::Acquire),
+            shared.qpc_freq.load(Ordering::Acquire),
+        );
         let mut backoff_ms = 40u64;
 
         'outer: while !shared.stop_requested.load(Ordering::Acquire) {

@@ -165,7 +165,6 @@ pub fn start(deck: WeakEntity<Deck>, state: std::sync::Arc<AppState>, cx: &mut g
                             // the native toast is the only feedback the user
                             // gets.
                             crate::platform::notify::clip_saved(
-                                cx,
                                 &outcome.clip.file_name,
                                 outcome.clip.duration_seconds,
                                 SaveTrigger::Autosave.as_str(),

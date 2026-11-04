@@ -75,6 +75,29 @@ IPC layer are gone.
   polled, so the flag is gone. When the default endpoint is missing or disabled
   the code now tries every active device, and privacy/exclusive-use failures
   explain how to fix them.
+- **Clipped audio no longer crackles when the microphone is enabled.** The −3 dB
+  mix pad for the system audio was only applied on polls where a microphone
+  packet happened to arrive in the same 8 ms window, so the game audio level
+  flipped between 100 % and 71 % at up to 125 Hz — an audible sizzle/buzz
+  under every clip. The pad is now fixed for the session and applied to every
+  sample of its source, while the mixer keeps sample alignment and never drops
+  a mic tail.
+- **Audio and video now share one clock epoch.** The audio thread inherited the
+  epoch from when the app *process started* while the capture thread created its
+  own at arm time. Every audio sample was therefore stamped as many minutes in
+  the future as the app had been running, which stopped the ring from ever
+  evicting audio, started clips with silence and let the audio track run past
+  the video. Arming now re-anchors one shared QPC epoch for both threads, and
+  the muxer drops audio that falls outside the video instead of stacking it on
+  timestamp 0.
+- **24-bit and 32-bit integer audio is decoded instead of silenced.** 24-bit
+  mix formats (USB DACs, AVRs, TVs over HDMI) fell into the decoder's “unknown
+  encoding” branch and produced digital silence. Both are now converted to the
+  float mix.
+- **Audio timestamps can no longer duplicate.** The AAC MFT can emit zero
+  payloads while priming or more than one while catching up; output frames are
+  now numbered independently (strictly increasing, gaps preserved), and encode
+  failures are logged instead of silently swallowed.
 
 ### Deferred (documented regressions, tracked for follow-ups)
 
