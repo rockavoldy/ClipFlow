@@ -11,8 +11,8 @@ name: Release
 # which reads `[package.metadata.packager]` in `Cargo.toml` and produces, in
 # `target/release`:
 #
-#   ClipFlow_<version>_x64-setup.exe   NSIS installer
-#   ClipFlow_<version>_x64_en-US.msi   WiX installer
+#   clipflow_<version>_x64-setup.exe    NSIS installer
+#   clipflow_<version>_x64_en-US.msi    WiX installer
 #
 # The portable build is the release binary itself (`clipflow.exe`).
 #
@@ -59,35 +59,70 @@ jobs:
         with:
           workspaces: . -> target
 
+      # gpui's Windows backend compiles its HLSL shaders with fxc.exe, and its
+      # build script only does that in a release build (`not(debug_assertions)`)
+      # - which is exactly what a release is. Without the compiler the build
+      # dies with a bare "Failed to find fxc.exe" panic. The script can find it
+      # on its own through the SDK registry key, but pinning the path here
+      # removes the guesswork.
+      - name: Locate fxc.exe (Windows HLSL compiler)
+        shell: pwsh
+        run: |
+          $fxc = $null
+          if (Get-Command fxc.exe -ErrorAction SilentlyContinue) {
+            $fxc = (Get-Command fxc.exe).Source
+          }
+          if (-not $fxc) {
+            $sdkKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0'
+            if (Test-Path $sdkKey) {
+              $root = (Get-ItemProperty $sdkKey).InstallationFolder
+              if ($root) {
+                $fxc = Get-ChildItem -Path (Join-Path $root 'bin') -Filter fxc.exe -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match 'x64' } |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1 -ExpandProperty FullName
+              }
+            }
+          }
+          if (-not $fxc) {
+            throw "fxc.exe not found. The Windows SDK is required to build the HLSL shaders."
+          }
+          Write-Host "fxc.exe: $fxc"
+          "GPUI_FXC_PATH=$fxc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       # A tag is a promise about the version. If the manifest says 1.4.2 and the
       # tag says v1.4.3, the installer would be named for one version and
       # advertise the other, and the in-app updater would compare against the
       # wrong number. Fail loudly instead.
       - name: Resolve and verify the version
+        id: version
         shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          $manifest = Get-Content Cargo.toml -Raw
-          if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+          # `cargo metadata` reads the version the build will actually use, so
+          # this cannot be confused by any other `version = "..."` line in the
+          # manifest. `--no-deps` keeps it offline and instant.
+          $meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $manifestVersion = $meta.packages[0].version
+          if (-not $manifestVersion) {
             throw "could not read the version from Cargo.toml"
           }
-          $manifestVersion = $Matches[1]
-          "manifest version: $manifestVersion"
-
-          $tag = '${{ github.ref_name }}'
-          $input = '${{ inputs.version }}'
+          Write-Host "manifest version: $manifestVersion"
 
           if ($env:GITHUB_EVENT_NAME -eq 'push') {
             $expected = "v$manifestVersion"
-            if ($tag -ne $expected) {
-              throw "tag '$tag' does not match the manifest version '$manifestVersion' (expected '$expected'). Bump Cargo.toml before tagging."
+            if ($env:REF_NAME -ne $expected) {
+              throw "tag '$($env:REF_NAME)' does not match the manifest version '$manifestVersion' (expected '$expected'). Bump Cargo.toml before tagging."
             }
             $version = $manifestVersion
           }
           else {
             # Manual dispatch: the input is optional and must agree with the
-            # manifest, because that is the version that gets built.
-            if ($input -and $input -ne $manifestVersion) {
-              throw "input version '$input' does not match the manifest version '$manifestVersion'"
+            # manifest, because that is the version that actually gets built.
+            if ($env:INPUT_VERSION -and $env:INPUT_VERSION -ne $manifestVersion) {
+              throw "input version '$($env:INPUT_VERSION)' does not match the manifest version '$manifestVersion'"
             }
             $version = $manifestVersion
           }
@@ -104,44 +139,52 @@ jobs:
         run: cargo build --release --locked
 
       # cargo-packager downloads the NSIS and WiX toolchains on first use, so
-      # the runner needs no extra setup.
+      # the runner needs no extra setup. The version is pinned to the one the
+      # packaging config in Cargo.toml was written against: a newer release
+      # could change the config schema (`Config` is `deny_unknown_fields`) and
+      # break the release build.
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
+        run: cargo install cargo-packager --version 0.11.8 --locked
 
       - name: Build installers
         run: cargo packager --release
 
       - name: Collect artifacts
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           $out = "target/release"
-          $files = @(
-            "$out/ClipFlow_${{ steps.version.outputs.version }}_x64-setup.exe",
-            "$out/ClipFlow_${{ steps.version.outputs.version }}_x64_en-US.msi",
-            "$out/clipflow.exe"
-          )
-          foreach ($f in $files) {
+          # cargo-packager names the installers after the *binary*, so they come
+          # out as `clipflow_<version>_x64-...`. Rename them to the product
+          # name the README and past releases use.
+          #
+          # `${env:VERSION}` needs the braces: without them PowerShell reads
+          # `$env:VERSION_x64` as one (undefined) variable name.
+          $setup = Join-Path $out "clipflow_${env:VERSION}_x64-setup.exe"
+          $msi = Join-Path $out "clipflow_${env:VERSION}_x64_en-US.msi"
+          $binary = Join-Path $out "clipflow.exe"
+
+          foreach ($f in @($setup, $msi, $binary)) {
             if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
           }
+
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item $setup "artifacts/ClipFlow_${env:VERSION}_x64-setup.exe"
+          Copy-Item $msi "artifacts/ClipFlow_${env:VERSION}_x64_en-US.msi"
           # The portable build gets a friendlier name, matching the layout the
           # README documents.
-          Copy-Item "$out/clipflow.exe" "$out/ClipFlow_${{ steps.version.outputs.version }}_Portable.exe"
+          Copy-Item $binary "artifacts/ClipFlow_v${env:VERSION}_Portable.exe"
 
           # `latest.json` is what the in-app update probe reads. Only the
           # version is needed: signed auto-install is deferred.
           $manifest = @{
-            version = "${{ steps.version.outputs.version }}"
-            notes = "ClipFlow ${{ steps.version.outputs.version }}"
+            version = $env:VERSION
+            notes = "ClipFlow $env:VERSION"
             pub_date = (Get-Date).ToUniversalTime().ToString("o")
             platforms = @{}
           }
-          $manifest | ConvertTo-Json -Depth 3 | Out-File "$out/latest.json" -Encoding utf8
-
-          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
-          Copy-Item "$out/ClipFlow_${{ steps.version.outputs.version }}_x64-setup.exe" artifacts/
-          Copy-Item "$out/ClipFlow_${{ steps.version.outputs.version }}_x64_en-US.msi" artifacts/
-          Copy-Item "$out/ClipFlow_${{ steps.version.outputs.version }}_Portable.exe" artifacts/
-          Copy-Item "$out/latest.json" artifacts/
+          $manifest | ConvertTo-Json -Depth 3 | Out-File artifacts/latest.json -Encoding utf8
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -152,7 +195,7 @@ jobs:
 
       # Published on a tag push, or on a manual run that asked for it.
       - name: Publish GitHub Release
-        if: ${{ github.event_name == 'push' || inputs.publish }}
+        if: ${{ github.event_name == 'push' || inputs.publish == true }}
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*

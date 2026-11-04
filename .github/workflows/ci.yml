@@ -50,6 +50,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # gpui's Linux backend links against X11/Wayland/fontconfig.
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libssl-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            cmake \
+            pkg-config
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,6 +78,39 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+
+      # gpui's Windows backend compiles its HLSL shaders with fxc.exe, which
+      # ships with the Windows SDK. gpui finds it through the SDK registry key
+      # on its own; locating it here turns a confusing "Failed to find
+      # fxc.exe" panic into an actionable message, and pinning the path makes
+      # the build independent of that lookup.
+      - name: Locate fxc.exe (Windows HLSL compiler)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $fxc = $null
+          if (Get-Command fxc.exe -ErrorAction SilentlyContinue) {
+            $fxc = (Get-Command fxc.exe).Source
+          }
+          if (-not $fxc) {
+            $sdkKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0'
+            if (Test-Path $sdkKey) {
+              $root = (Get-ItemProperty $sdkKey).InstallationFolder
+              if ($root) {
+                $fxc = Get-ChildItem -Path (Join-Path $root 'bin') -Filter fxc.exe -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match 'x64' } |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1 -ExpandProperty FullName
+              }
+            }
+          }
+          if ($fxc) {
+            Write-Host "fxc.exe: $fxc"
+            "GPUI_FXC_PATH=$fxc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          else {
+            Write-Warning "fxc.exe not found. gpui will look for it itself; the release build needs it."
+          }
 
       - name: Check
         run: cargo check --all-targets ${{ matrix.features }}

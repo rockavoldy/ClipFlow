@@ -1,0 +1,13 @@
+// Windows resources for the ClipFlow executable.
+//
+// The icon is compiled into the .exe so Windows shows it in the taskbar, in
+// the Start menu, in Explorer and in the Add/Remove Programs list. Without it
+// the shipped binary shows the generic "unknown application" icon, and so does
+// every shortcut the installer creates.
+//
+// This file lives next to `icon.ico` on purpose. The resource compiler is
+// invoked from different working directories by the different toolchains
+// (rc.exe resolves relative to the crate root, llvm-rc relative to this file's
+// directory), so "icon.ico" next to this .rc is the only spelling that
+// resolves under both. build.rs also passes `icons/` as an include directory.
+1 ICON "icon.ico"

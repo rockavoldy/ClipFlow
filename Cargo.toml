@@ -122,6 +122,12 @@ features = [
 [target.'cfg(windows)'.dependencies.windows-core]
 version = "0.58.0"
 
+# ---------------------------------------------------------------- build script
+# Compiles `icons/icon.ico` into the executable on Windows. The crate itself
+# builds everywhere; only the call in build.rs is Windows-only.
+[build-dependencies]
+embed-resource = "3.0.11"
+
 [features]
 # Allows `cargo run --features headless-sim` on non-Windows dev machines: the
 # capture engine falls back to a deterministic synthetic pipeline and every
@@ -148,6 +154,7 @@ headless-sim = []
 [package.metadata.packager]
 product-name = "ClipFlow"
 identifier = "dev.clipflow.app"
+publisher = "ClipFlow Contributors"
 homepage = "https://github.com/jaimitus/ClipFlow"
 before-packaging-command = "cargo build --release --locked"
 formats = ["nsis", "wix"]
@@ -161,6 +168,11 @@ icons = [
 [[package.metadata.packager.binaries]]
 path = "clipflow"
 main = true
+
+# The installer's own icon - without it the downloaded `setup.exe` shows the
+# generic NSIS icon in Explorer and in the "Open with" prompt.
+[package.metadata.packager.nsis]
+installer-icon = "icons/icon.ico"
 
 [profile.dev]
 incremental = true

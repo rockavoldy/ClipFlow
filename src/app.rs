@@ -60,17 +60,20 @@ pub fn run() {
             Ok(registered) => Arc::new(parking_lot::Mutex::new(registered)),
             Err(e) => {
                 // A hotkey conflict must not stop the app: the deck buttons and
-                // the tray menu still work, and the user can rebind.
+                // the tray menu still work, and the user can rebind. The
+                // fallback bindings are *not* registered with the OS - if the
+                // stored combos were refused, retrying the same default combos
+                // would be refused too, and the app must still open.
                 log::warn!("[clipflow] global hotkeys unavailable: {e}");
-                match Registered::install("Alt+C", "Alt+Shift+C") {
+                match Registered::unbound(&settings.hotkey_save, &settings.hotkey_toggle) {
                     Ok(registered) => Arc::new(parking_lot::Mutex::new(registered)),
                     Err(e) => {
-                        log::error!("[clipflow] no global hotkeys available: {e}");
-                        // Keep the app running with an inert registry so the
-                        // plumbing below stays uniform.
+                        log::error!("[clipflow] no usable hotkey bindings: {e}");
+                        // Even this cannot fail: `unbound` only parses, and the
+                        // defaults are known-good.
                         Arc::new(parking_lot::Mutex::new(
-                            Registered::install("Alt+C", "Alt+Shift+C")
-                                .unwrap_or_else(|_| unreachable!("defaults always parse")),
+                            Registered::unbound("Alt+C", "Alt+Shift+C")
+                                .unwrap_or_else(|_| unreachable!("the defaults always parse")),
                         ))
                     }
                 }

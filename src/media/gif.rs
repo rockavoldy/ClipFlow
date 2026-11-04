@@ -771,7 +771,10 @@ mod tests {
         }
         // 4 wide -> 3 wide; pixel 1 (middle) must sit between red and green.
         let out = resize_bilinear_rgb(&src, 4, 2, 3, 2);
-        let mid = &out[(0 * 3 + 1) * 3..(0 * 3 + 1) * 3 + 3];
+        // Row 0, pixel 1 - the middle pixel of a 3-wide row. Spelled out
+        // instead of `0 * 3 + 1` because clippy's erasing_op lint rejects
+        // arithmetic that always evaluates to zero.
+        let mid = &out[3..6];
         // Exact blend depends on coordinate mapping; assert it is neither
         // pure red nor pure green (i.e. a real interpolation happened).
         assert!(mid[0] > 0 && mid[0] < 255, "mid red = {} should be blended", mid[0]);

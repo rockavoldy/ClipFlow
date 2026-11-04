@@ -211,61 +211,118 @@ mod tests {
 // Runtime registration
 // ---------------------------------------------------------------------------
 
-/// The live bindings. Owns the manager so the OS registrations live exactly as
-/// long as the app, and keeps the id → intent map the drain task uses.
+/// The platform half of a registration.
+///
+/// Registering a global hotkey is a process-wide, exclusive operation: two
+/// live `Alt+C` registrations cannot coexist. That is why the trait exists -
+/// it lets the binding *logic* (which combo wins, in which order the old one is
+/// released) be exercised without an OS. Tests register against a recorder, not
+/// against the real manager.
+pub trait Registrar {
+    fn register(&self, key: HotKey) -> Result<(), String>;
+    fn unregister(&self, key: HotKey) -> Result<(), String>;
+}
+
 #[cfg(all(windows, not(feature = "headless-sim")))]
+impl Registrar for global_hotkey::GlobalHotKeyManager {
+    fn register(&self, key: HotKey) -> Result<(), String> {
+        global_hotkey::GlobalHotKeyManager::register(self, key).map_err(|e| e.to_string())
+    }
+    fn unregister(&self, key: HotKey) -> Result<(), String> {
+        global_hotkey::GlobalHotKeyManager::unregister(self, key).map_err(|e| e.to_string())
+    }
+}
+
+/// Resolves a stored accelerator, falling back to a default when the stored
+/// value is unusable.
+///
+/// A corrupt `settings.json` must not stop the app from opening: the combo is
+/// logged and replaced, and the deck buttons still work.
+pub fn resolve_or_default(stored: &str, fallback: &str) -> Result<HotKey, String> {
+    match validate(stored) {
+        Ok(key) => Ok(key),
+        Err(e) => {
+            log::warn!("[clipflow] hotkey '{stored}' unusable: {e}");
+            validate(fallback).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Swaps one binding, **registering the new combo before unregistering the old
+/// one** (the ordering inherited from the Tauri build).
+///
+/// That ordering is what makes a conflict safe: if the new combo is already
+/// owned by another app, `register` fails and the old binding is still live, so
+/// the user is never left with no hotkey at all.
+pub fn swap_binding(registrar: &dyn Registrar, old: HotKey, new: HotKey) -> Result<(), String> {
+    if old == new {
+        return Ok(()); // no-op; re-registering would fail
+    }
+    registrar.register(new)?;
+    // Only now is it safe to drop the old one.
+    if let Err(e) = registrar.unregister(old) {
+        log::warn!("[clipflow] could not unregister the old hotkey: {e}");
+    }
+    Ok(())
+}
+
+#[cfg(all(windows, not(feature = "headless-sim")))]
+/// The live bindings.
+///
+/// Owns the OS registrations for exactly as long as the app runs and keeps the
+/// id → intent map the drain task uses.
+///
+/// The manager is optional so the binding logic can be exercised without the
+/// OS. See [`Registered::unbound`].
 pub struct Registered {
-    manager: global_hotkey::GlobalHotKeyManager,
+    manager: Option<global_hotkey::GlobalHotKeyManager>,
     save: HotKey,
     toggle: HotKey,
 }
 
 #[cfg(all(windows, not(feature = "headless-sim")))]
 impl Registered {
-    /// Registers both stored accelerators. A bad value in `settings.json` is
-    /// logged and skipped rather than fatal: a broken save hotkey must not stop
-    /// the app from opening (the deck button still works).
+    /// Registers both stored accelerators with the OS.
+    ///
+    /// Fails when the OS refuses a combo (another app already owns it). The
+    /// caller decides whether that is fatal.
     pub fn install(save: &str, toggle: &str) -> Result<Self, String> {
         let manager = global_hotkey::GlobalHotKeyManager::new()
             .map_err(|e| format!("could not create the hotkey manager: {e}"))?;
 
-        let save_key = match validate(save) {
-            Ok(k) => k,
-            Err(e) => {
-                log::warn!("[clipflow] save hotkey unusable: {e}");
-                validate("Alt+C").map_err(|e| e.to_string())?
-            }
-        };
-        let toggle_key = match validate(toggle) {
-            Ok(k) => k,
-            Err(e) => {
-                log::warn!("[clipflow] toggle hotkey unusable: {e}");
-                validate("Alt+Shift+C").map_err(|e| e.to_string())?
-            }
-        };
+        let save_key = resolve_or_default(save, "Alt+C")?;
+        let toggle_key = resolve_or_default(toggle, "Alt+Shift+C")?;
 
-        manager
-            .register(save_key)
+        Registrar::register(&manager, save_key)
             .map_err(|e| format!("could not register '{save}': {e}"))?;
-        if let Err(e) = manager.register(toggle_key) {
+        if let Err(e) = Registrar::register(&manager, toggle_key) {
             // Roll back the first so we never leave a half-bound state.
-            let _ = manager.unregister(save_key);
+            let _ = Registrar::unregister(&manager, save_key);
             return Err(format!("could not register '{toggle}': {e}"));
         }
 
         Ok(Self {
-            manager,
+            manager: Some(manager),
             save: save_key,
             toggle: toggle_key,
         })
     }
 
-    /// Swaps one binding, **registering the new combo before unregistering the
-    /// old one** (order inherited from the Tauri build).
+    /// A binding set that is **not** registered with the OS.
     ///
-    /// That ordering is what makes a conflict safe: if the new combo is already
-    /// owned by another app, `register` fails and the old binding is still
-    /// live, so the user is never left with no hotkey at all.
+    /// Used when the OS refused the combos: the app still runs and the deck
+    /// buttons still work, the keyboard shortcuts simply do not fire. Without
+    /// this the app would have to crash, because the only combos it knows how
+    /// to register are the ones that were just refused.
+    pub fn unbound(save: &str, toggle: &str) -> Result<Self, String> {
+        Ok(Self {
+            manager: None,
+            save: resolve_or_default(save, "Alt+C")?,
+            toggle: resolve_or_default(toggle, "Alt+Shift+C")?,
+        })
+    }
+
+    /// Swaps one binding in place.
     pub fn rebind(
         &mut self,
         action: crate::ui::deck::HotkeyAction,
@@ -277,16 +334,10 @@ impl Registered {
             crate::ui::deck::HotkeyAction::Toggle => (&mut self.toggle, "toggle"),
         };
 
-        if *old_key == new_key {
-            return Ok(()); // no-op; re-registering would fail
-        }
-
-        self.manager
-            .register(new_key)
-            .map_err(|e| format!("'{new_accelerator}' is already in use ({e})"))?;
-        // Only now is it safe to drop the old one.
-        if let Err(e) = self.manager.unregister(*old_key) {
-            log::warn!("[clipflow] could not unregister the old {slot} hotkey: {e}");
+        if let Some(manager) = self.manager.as_ref() {
+            swap_binding(manager, *old_key, new_key)
+                .map_err(|e| format!("'{new_accelerator}' is already in use ({e})"))?;
+            let _ = slot;
         }
         *old_key = new_key;
         Ok(())
@@ -318,10 +369,16 @@ pub struct Registered {
 impl Registered {
     pub fn install(save: &str, toggle: &str) -> Result<Self, String> {
         Ok(Self {
-            save: validate(save).unwrap_or_else(|_| parse("Alt+C").expect("default parses")),
-            toggle: validate(toggle)
-                .unwrap_or_else(|_| parse("Alt+Shift+C").expect("default parses")),
+            save: resolve_or_default(save, "Alt+C")?,
+            toggle: resolve_or_default(toggle, "Alt+Shift+C")?,
         })
+    }
+
+    /// Off-Windows there is no OS to refuse a combo, so this is the same as
+    /// [`Registered::install`]. It exists so the call sites read the same on
+    /// every platform.
+    pub fn unbound(save: &str, toggle: &str) -> Result<Self, String> {
+        Self::install(save, toggle)
     }
 
     pub fn rebind(
@@ -353,30 +410,63 @@ impl Registered {
 mod registration_tests {
     use super::*;
     use crate::ui::deck::{HotkeyAction, Intent};
+    use std::cell::RefCell;
+
+    /// Records what the registration layer was asked to do, so the ordering
+    /// contract can be asserted without touching the OS.
+    #[derive(Default)]
+    struct Recorder {
+        calls: RefCell<Vec<&'static str>>,
+        fail_register: bool,
+    }
+
+    impl Recorder {
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Registrar for Recorder {
+        fn register(&self, _key: HotKey) -> Result<(), String> {
+            self.calls.borrow_mut().push("register");
+            if self.fail_register {
+                Err("combo is taken".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        fn unregister(&self, _key: HotKey) -> Result<(), String> {
+            self.calls.borrow_mut().push("unregister");
+            Ok(())
+        }
+    }
 
     #[test]
-    fn install_accepts_the_shipped_defaults() {
-        let reg = Registered::install("Alt+C", "Alt+Shift+C").unwrap();
-        // Ids are (mods << 16) | key, so the two bindings must differ.
-        assert_ne!(
-            reg.intent_for(parse("Alt+C").unwrap().id()),
-            reg.intent_for(parse("Alt+Shift+C").unwrap().id())
+    fn a_corrupt_stored_combo_falls_back_to_the_default() {
+        // A corrupt settings.json must not stop the app from opening.
+        assert_eq!(
+            resolve_or_default("not+a+hotkey", "Alt+C").unwrap().id(),
+            parse("Alt+C").unwrap().id()
+        );
+        assert_eq!(
+            resolve_or_default("", "Alt+Shift+C").unwrap().id(),
+            parse("Alt+Shift+C").unwrap().id()
         );
     }
 
     #[test]
-    fn install_falls_back_when_settings_hold_garbage() {
-        // A corrupt settings.json must not stop the app from opening.
-        let reg = Registered::install("not+a+hotkey", "").unwrap();
-        assert_eq!(
-            reg.intent_for(parse("Alt+C").unwrap().id()),
-            Some(Intent::Hotkey(HotkeyAction::Save))
-        );
+    fn the_two_actions_never_alias_each_other() {
+        let reg = Registered::unbound("Alt+C", "Alt+Shift+C").unwrap();
+        let save = reg.intent_for(parse("Alt+C").unwrap().id());
+        let toggle = reg.intent_for(parse("Alt+Shift+C").unwrap().id());
+        assert_ne!(save, toggle);
+        assert_eq!(save, Some(Intent::Hotkey(HotkeyAction::Save)));
+        assert_eq!(toggle, Some(Intent::Hotkey(HotkeyAction::Toggle)));
     }
 
     #[test]
     fn rebind_rejects_a_modifierless_combo_and_keeps_the_old_binding() {
-        let mut reg = Registered::install("Alt+C", "Alt+Shift+C").unwrap();
+        let mut reg = Registered::unbound("Alt+C", "Alt+Shift+C").unwrap();
         let err = reg.rebind(HotkeyAction::Save, "C").unwrap_err();
         assert!(err.contains("needs a modifier"), "{err}");
         assert_eq!(
@@ -387,7 +477,7 @@ mod registration_tests {
 
     #[test]
     fn rebind_to_the_same_combo_is_a_noop() {
-        let mut reg = Registered::install("Alt+C", "Alt+Shift+C").unwrap();
+        let mut reg = Registered::unbound("Alt+C", "Alt+Shift+C").unwrap();
         assert!(reg.rebind(HotkeyAction::Save, "Alt+C").is_ok());
         assert_eq!(
             reg.intent_for(parse("Alt+C").unwrap().id()),
@@ -397,7 +487,7 @@ mod registration_tests {
 
     #[test]
     fn rebind_moves_the_binding() {
-        let mut reg = Registered::install("Alt+C", "Alt+Shift+C").unwrap();
+        let mut reg = Registered::unbound("Alt+C", "Alt+Shift+C").unwrap();
         reg.rebind(HotkeyAction::Save, "Ctrl+Alt+F9").unwrap();
         assert_eq!(
             reg.intent_for(parse("Ctrl+Alt+F9").unwrap().id()),
@@ -407,11 +497,30 @@ mod registration_tests {
         assert_eq!(reg.intent_for(parse("Alt+C").unwrap().id()), None);
     }
 
+    /// The ordering contract: the new combo is registered *before* the old one
+    /// is released, so a conflict leaves the user with a working hotkey.
     #[test]
-    fn the_two_actions_never_alias_each_other() {
-        let reg = Registered::install("Alt+C", "Alt+Shift+C").unwrap();
-        let save = reg.intent_for(parse("Alt+C").unwrap().id());
-        let toggle = reg.intent_for(parse("Alt+Shift+C").unwrap().id());
-        assert_ne!(save, toggle);
+    fn the_new_combo_is_registered_before_the_old_one_is_released() {
+        let recorder = Recorder::default();
+        let old = parse("Alt+C").unwrap();
+        let new = parse("Ctrl+Alt+F9").unwrap();
+
+        swap_binding(&recorder, old, new).unwrap();
+        assert_eq!(recorder.calls(), vec!["register", "unregister"]);
+    }
+
+    /// ...and when the new combo is refused, the old one is never released.
+    #[test]
+    fn a_refused_combo_leaves_the_old_binding_live() {
+        let recorder = Recorder {
+            fail_register: true,
+            ..Recorder::default()
+        };
+        let old = parse("Alt+C").unwrap();
+        let new = parse("Ctrl+Alt+F9").unwrap();
+
+        let err = swap_binding(&recorder, old, new).unwrap_err();
+        assert!(err.contains("combo is taken"), "{err}");
+        assert_eq!(recorder.calls(), vec!["register"]);
     }
 }

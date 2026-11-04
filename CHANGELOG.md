@@ -27,8 +27,13 @@ IPC layer are gone.
   from the migration Q&A, not a regression.
 - **The clip library is a virtualised list** rather than a multi-column grid:
   fewer clips per screen, but smooth at thousands of files.
-- **Build requirements:** Rust **1.85+** (edition 2021), Visual Studio C++ build
-  tools + Windows SDK. Node.js is no longer required.
+- **Build requirements:** Rust **1.98+** (edition 2021), Visual Studio C++ build
+  tools + Windows SDK. Node.js is no longer required. The floor is 1.98
+  because the GPUI stack uses `Option::map_or_default`, stabilised in 1.98.0.
+- **The app icon is compiled into the executable.** `icons/icon.ico` is embedded
+  as a Windows resource, so the `.exe`, the Start-menu shortcut and the installed
+  application show the ClipFlow icon instead of the generic Windows one. The
+  NSIS installer carries the same icon.
 
 ### Deferred (documented regressions, tracked for follow-ups)
 
@@ -63,6 +68,16 @@ code are retained so a later plan can restore them without a migration.
 
 ### Fixed along the way
 
+- **A hotkey conflict can no longer stop the app from opening.** If the OS
+  refuses the accelerator (another app already owns `Alt+C`), the app used to
+  retry the very same combo and panic when that failed too. It now keeps the
+  bindings unregistered and stays open: the deck buttons and the tray menu
+  still work and the user can rebind.
+- **The global-hotkey tests no longer touch the OS.** Registering a global
+  hotkey is exclusive per process, so the tests that exercised the real
+  manager could collide with each other. The registration logic now sits behind
+  a small trait, and the tests drive a recorder - which also lets them assert
+  the "register the new combo before releasing the old one" ordering.
 - The library's "all games" filter no longer matches nothing (a filter bug found
   while porting `galleryState` to Rust).
 - The first auto-save-on-game-exit no longer waits out a cooldown measured from
@@ -72,11 +87,12 @@ code are retained so a later plan can restore them without a migration.
 
 ### Tests
 
-- **173 Rust unit tests**, up from 8: the frontend Vitest suites were ported
+- **174 Rust unit tests**, up from 8: the frontend Vitest suites were ported
   one-for-one (privacy-gate hysteresis, ECO decision + hysteresis, selection
   ranges, gallery filter/sort/persistence, `split_at_seconds`), plus new tests
   for the accelerator formatter, autostart command line, CF_HDROP edge cases,
-  save-gate reasons, telemetry formatting and thumbnail decoding.
+  save-gate reasons, telemetry formatting, thumbnail decoding and the hotkey
+  registration ordering.
 
 ## [1.4.2] - 2026-08-11
 
