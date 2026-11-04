@@ -8,7 +8,6 @@ fn main() {
     // explicitly instead.
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
     if target_os == "windows" {
         // 1. Media Foundation + DXGI are delay-loaded on purpose: ClipFlow must
@@ -21,40 +20,7 @@ fn main() {
         println!("cargo:rustc-link-arg=/DELAYLOAD:mfuuid.dll");
         println!("cargo:rustc-link-lib=dylib=delayimp");
 
-        // 2. The DPI-awareness manifest Tauri used to emit. Without it the deck
-        //    renders blurry on a scaled display and mouse coordinates drift
-        //    from the painted pixels.
-        if target_env == "msvc" {
-            let manifest = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
-      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
-    </windowsSettings>
-  </application>
-</assembly>
-"#;
-            let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
-            let manifest_path = std::path::Path::new(&out_dir).join("clipflow.manifest");
-            std::fs::write(&manifest_path, manifest).expect("write application manifest");
-            // `/MANIFESTINPUT` is merged into the default manifest rather than
-            // replacing it, so the linker's UAC settings survive.
-            //
-            // `/MANIFEST:EMBED` is not optional here: the MSVC linker refuses
-            // to take an input manifest unless it is also told to embed the
-            // result, and fails the link with
-            //   LNK1220: 'MANIFESTINPUT' requires '/MANIFEST:EMBED' specification
-            // rustc passes no `/MANIFEST*` flag of its own on the MSVC target,
-            // so nothing else supplies it. The flag was lost when the Tauri
-            // build script was replaced by this one - tauri's build.rs emitted
-            // both.
-            println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-            println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest_path.display());
-        }
-
-        // 3. The app icon, compiled into the executable.
+        // 2. The app icon, compiled into the executable.
         //
         //    Without it the .exe (and every shortcut the installer makes) shows
         //    the generic "unknown application" icon. The resource compiler is
@@ -64,9 +30,20 @@ fn main() {
         //    A missing resource compiler is not fatal - an icon is cosmetic -
         //    but the warning says so, because on the release runner it means
         //    the shipped binary would have no icon.
-        // The .rc lives next to the icon: see the comment in `icons/clipflow.rc`
-        // for why the relative path has to resolve from two different working
-        // directories.
+        //
+        //    The DPI-awareness / UAC manifest is deliberately *not* emitted
+        //    here. gpui-pre already embeds its own manifest (`1 RT_MANIFEST`)
+        //    through its default `windows-manifest` feature, which covers DPI
+        //    awareness, UAC `asInvoker`, SegmentHeap and the Common-Controls 6
+        //    dependency. Adding a second manifest through `/MANIFESTINPUT` +
+        //    `/MANIFEST:EMBED` puts two `type:MANIFEST, name:1` resources into
+        //    the same binary and the linker dies with
+        //      CVTRES : fatal error CVT1100: duplicate resource
+        //    so ClipFlow relies on gpui's manifest alone.
+        //
+        //    The .rc lives next to the icon: see the comment in
+        //    `icons/clipflow.rc` for why the relative path has to resolve from
+        //    two different working directories.
         let icon_dir = std::path::Path::new("icons");
         let rc_file = icon_dir.join("clipflow.rc");
         println!("cargo:rerun-if-changed={}", rc_file.display());

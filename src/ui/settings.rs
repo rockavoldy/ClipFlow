@@ -814,9 +814,16 @@ pub fn slider_state(
     step: u32,
     value: u32,
 ) -> SliderState {
+    // `max` must be applied before `min`. gpui-kit's `SliderState::min()` setter
+    // immediately re-derives the thumb position, and that calls
+    // `value.clamp(self.min, self.max)`. `SliderState::new()` starts at
+    // `max = 100.0`, so a slider whose real minimum is above 100 (e.g. the
+    // bitrate slider at 3000) would make the intermediate `clamp(3000, 100)`
+    // panic with `min > max, or either was NaN`. Setting `max` first keeps
+    // `min <= max` at every step.
     SliderState::new()
-        .min(min as f32)
         .max(max as f32)
+        .min(min as f32)
         .step(step as f32)
         .default_value(value as f32)
 }
@@ -865,6 +872,16 @@ mod tests {
         assert_eq!(FPS_PRESETS, [30, 60, 120, 144]);
         assert_eq!((BITRATE_MIN, BITRATE_MAX, BITRATE_STEP), (3_000, 60_000, 1_000));
         assert_eq!((VOLUME_MIN, VOLUME_MAX, VOLUME_STEP), (0, 100, 5));
+    }
+
+    #[test]
+    fn sliders_whose_min_exceeds_the_default_max_do_not_panic() {
+        // Regression test: gpui-kit's `SliderState` starts at `max = 100.0` and
+        // re-clamps on every builder step, so building the bitrate slider
+        // (`min = 3000`) used to panic with "min > max, or either was NaN".
+        // `slider_state` must therefore apply `max` before `min`.
+        let _ = slider_state(BITRATE_MIN, BITRATE_MAX, BITRATE_STEP, 30_000);
+        let _ = slider_state(VOLUME_MIN, VOLUME_MAX, VOLUME_STEP, 50);
     }
 
     #[test]
