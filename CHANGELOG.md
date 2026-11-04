@@ -2,6 +2,82 @@
 
 All notable changes to **ClipFlow** are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Tauri → GPUI migration
+
+ClipFlow's UI moved from a Tauri v2 shell + React/WebView2 frontend to a **native
+GPUI** desktop app. The capture engine is unchanged; the shell, the UI and the
+IPC layer are gone.
+
+### Changed
+
+- **Native UI (gpui-kit 0.9 / gpui-pre 0.3.11).** One window, one Rust view tree.
+  No WebView2 runtime, no Node build step, no IPC bridge. The release artifact
+  is a single `clipflow.exe` plus the usual NSIS/MSI installers.
+- **`settings.json` is byte-compatible.** Same path (`%APPDATA%\ClipFlow`), same
+  field names and clamps; an existing install keeps its settings, hotkeys,
+  favourites and tags. Fields belonging to deferred features are still persisted
+  and simply unused.
+- **Gallery view state** moved from `localStorage` to
+  `%APPDATA%\ClipFlow\gallery_state.json`, same JSON shape and the same
+  sanitising rules.
+- **Save feedback is inverted on purpose.** Previously a toast appeared only when
+  the trimmer was *not* going to open. Now every hotkey/tray save raises a native
+  toast, and the deck is raised *in addition* only when the foreground is
+  positively ClipFlow or the desktop. This is the documented behaviour change
+  from the migration Q&A, not a regression.
+- **The clip library is a virtualised list** rather than a multi-column grid:
+  fewer clips per screen, but smooth at thousands of files.
+- **Build requirements:** Rust **1.85+** (edition 2021), Visual Studio C++ build
+  tools + Windows SDK. Node.js is no longer required.
+
+### Deferred (documented regressions, tracked for follow-ups)
+
+These shipped in 1.4.2 and are **not** in this build. Their settings and engine
+code are retained so a later plan can restore them without a migration.
+
+- **REC HUD / overlay** — no always-on-top control panel. `hud_enabled` and
+  `hud_position` are still persisted and inert.
+- **Video playback, trimmer, split-at-playhead, PNG snapshot and GIF export** —
+  clicking a clip opens it in the system player instead. `split_at_seconds` and
+  its tests are retained; the engine's `trim_stream_copy`/GIF code is untouched.
+- **Per-game profile editor and the profile auto-switch loop** — profiles are
+  still seeded, persisted and applied through the same code path, but there is no
+  editor UI.
+- **STATS tab** — telemetry lives on the capture card and in the settings footer.
+- **Onboarding overlay.**
+- **Signed auto-updater** — the app still probes `latest.json` and opens the
+  Releases page, but does not download or install.
+
+### Removed
+
+- `src/` (React/TypeScript), `index.html`, `vite.config.ts`, `tsconfig.json`,
+  `package.json`, `package-lock.json`.
+- `tauri.conf.json`, `capabilities/`, `gen/` and the Tauri shell
+  (`src/{lib,commands,hotkeys}.rs`), plus `build.rs`'s `tauri_build` call (the
+  DPI manifest and Media Foundation delay-loads stay).
+- The crate moved from `src-tauri/` to the repository root: with the frontend
+  gone there is nothing left for that directory to separate, so `cargo build`,
+  `cargo test` and `cargo packager` now run from the root and the icon set
+  lives in `icons/`.
+- Dependencies: `tauri`, all `tauri-plugin-*`, `tokio`.
+
+### Fixed along the way
+
+- The library's "all games" filter no longer matches nothing (a filter bug found
+  while porting `galleryState` to Rust).
+- The first auto-save-on-game-exit no longer waits out a cooldown measured from
+  process start.
+- ECO no longer re-applies an unchanged buffer every poll when the configured
+  buffer is already at or below the ECO length.
+
+### Tests
+
+- **173 Rust unit tests**, up from 8: the frontend Vitest suites were ported
+  one-for-one (privacy-gate hysteresis, ECO decision + hysteresis, selection
+  ranges, gallery filter/sort/persistence, `split_at_seconds`), plus new tests
+  for the accelerator formatter, autostart command line, CF_HDROP edge cases,
+  save-gate reasons, telemetry formatting and thumbnail decoding.
+
 ## [1.4.2] - 2026-08-11
 
 ### Added

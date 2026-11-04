@@ -1,8 +1,11 @@
 name: CI
 
 # Gates every pull request (and every push to main) with the same checks we
-# run locally, so code that breaks `tsc` or the test suites never merges —
-# SonarCloud alone was not enough (a PR with 6 tsc errors passed it).
+# run locally, so code that breaks the build or the test suites never merges.
+#
+# There is no frontend any more: the Tauri shell and the React app are gone and
+# the UI is Rust (GPUI), so "typecheck + tests + build" is now
+# "cargo check + cargo test + cargo clippy".
 
 on:
   pull_request:
@@ -16,59 +19,58 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  frontend:
-    name: Frontend · typecheck + tests + build
-    runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Typecheck (tsc --noEmit)
-        run: npm run typecheck
-
-      - name: Unit tests (vitest)
-        run: npm test
-
-      - name: Frontend build (vite)
-        run: npm run build
-
-  rust:
-    name: Rust · cargo test
-    runs-on: windows-latest
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows is the shipping target: the real DXGI / Media Foundation /
+          # WASAPI engine compiles here, and the GPUI Windows backend (plus the
+          # HLSL shader compilation in gpui-pre-windows' build script) is
+          # exercised.
+          - name: Windows · engine
+            os: windows-latest
+            features: ""
+          # Everywhere else the engine falls back to its synthetic backend and
+          # every platform module degrades to a stub, so the UI, the settings
+          # model and all policy tests still compile and run.
+          - name: macOS · headless-sim
+            os: macos-latest
+            features: "--features headless-sim"
+          - name: Linux · headless-sim
+            os: ubuntu-latest
+            features: "--features headless-sim"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: ./src-tauri -> target
+          workspaces: . -> target
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - name: Check
+        run: cargo check --all-targets ${{ matrix.features }}
 
-      # tauri::generate_context! embeds the built frontend (../dist) at compile
-      # time, so the frontend must be built before cargo can compile the tests.
-      - name: Build frontend (for tauri context)
-        run: |
-          npm ci
-          npm run build
+      - name: Unit tests
+        run: cargo test ${{ matrix.features }}
 
-      - name: Unit tests (cargo test)
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --all-targets ${{ matrix.features }}
+
+      # The release profile is what ships (`opt-level = "s"`, `lto`,
+      # `panic = "abort"`), and the Windows release build compiles gpui's HLSL
+      # shaders, so it is checked here rather than only on a tag.
+      - name: Check release profile
+        run: cargo check --release ${{ matrix.features }}

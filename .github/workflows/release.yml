@@ -1,40 +1,55 @@
 name: Release
 
-# Push a tag like `v1.1.0` (or run manually) to build, sign and publish a
-# GitHub Release. tauri-action uploads the installers, their `.sig` files and
-# the `latest.json` updater manifest — which is exactly the endpoint ClipFlow's
-# in-app updater polls (`releases/latest/download/latest.json`).
+# Builds the Windows installers and publishes them.
+#
+# Triggered by pushing a version tag (`v1.2.3`), or run manually from the
+# Actions tab. The old build used `tauri-action`; that is gone with the Tauri
+# shell, so this uses `cargo-packager` directly:
+#
+#   cargo packager --release
+#
+# which reads `[package.metadata.packager]` in `Cargo.toml` and produces, in
+# `target/release`:
+#
+#   ClipFlow_<version>_x64-setup.exe   NSIS installer
+#   ClipFlow_<version>_x64_en-US.msi   WiX installer
+#
+# The portable build is the release binary itself (`clipflow.exe`).
+#
+# `latest.json` is published alongside the installers because the in-app
+# "Check for updates" row in Settings probes
+# `releases/latest/download/latest.json` for the `version` field. (Signed
+# auto-install is deferred; see CHANGELOG.md.)
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 1.4.3). Must match Cargo.toml."
+        required: false
+        type: string
+      publish:
+        description: "Also create/update a GitHub Release with these artifacts."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
-jobs:
-  release:
-    # Explicitly granted inside the job: the repo default is read-only, and
-    # release creation needs contents: write on the GITHUB_TOKEN.
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [windows-latest]
-    runs-on: ${{ matrix.platform }}
+env:
+  CARGO_TERM_COLOR: always
 
+jobs:
+  package:
+    name: Windows package
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -42,31 +57,114 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: ./src-tauri -> target
+          workspaces: . -> target
 
-      - name: Install frontend dependencies
-        run: npm ci
+      # A tag is a promise about the version. If the manifest says 1.4.2 and the
+      # tag says v1.4.3, the installer would be named for one version and
+      # advertise the other, and the in-app updater would compare against the
+      # wrong number. Fail loudly instead.
+      - name: Resolve and verify the version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw "could not read the version from Cargo.toml"
+          }
+          $manifestVersion = $Matches[1]
+          "manifest version: $manifestVersion"
 
-      # Gate the release with the same local checks. tauri-action's vite build
-      # strips types via esbuild without checking them, so without this step a
-      # tag could publish code that fails tsc or the test suites.
-      - name: Typecheck and unit tests
-        run: npm run typecheck && npm test
+          $tag = '${{ github.ref_name }}'
+          $input = '${{ inputs.version }}'
 
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $expected = "v$manifestVersion"
+            if ($tag -ne $expected) {
+              throw "tag '$tag' does not match the manifest version '$manifestVersion' (expected '$expected'). Bump Cargo.toml before tagging."
+            }
+            $version = $manifestVersion
+          }
+          else {
+            # Manual dispatch: the input is optional and must agree with the
+            # manifest, because that is the version that gets built.
+            if ($input -and $input -ne $manifestVersion) {
+              throw "input version '$input' does not match the manifest version '$manifestVersion'"
+            }
+            $version = $manifestVersion
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Gate the release with the same checks CI runs, so a tag cannot publish
+      # a build that fails its own test suite.
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      # cargo-packager downloads the NSIS and WiX toolchains on first use, so
+      # the runner needs no extra setup.
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: Build installers
+        run: cargo packager --release
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $out = "target/release"
+          $files = @(
+            "$out/ClipFlow_${{ steps.version.outputs.version }}_x64-setup.exe",
+            "$out/ClipFlow_${{ steps.version.outputs.version }}_x64_en-US.msi",
+            "$out/clipflow.exe"
+          )
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
+          }
+          # The portable build gets a friendlier name, matching the layout the
+          # README documents.
+          Copy-Item "$out/clipflow.exe" "$out/ClipFlow_${{ steps.version.outputs.version }}_Portable.exe"
+
+          # `latest.json` is what the in-app update probe reads. Only the
+          # version is needed: signed auto-install is deferred.
+          $manifest = @{
+            version = "${{ steps.version.outputs.version }}"
+            notes = "ClipFlow ${{ steps.version.outputs.version }}"
+            pub_date = (Get-Date).ToUniversalTime().ToString("o")
+            platforms = @{}
+          }
+          $manifest | ConvertTo-Json -Depth 3 | Out-File "$out/latest.json" -Encoding utf8
+
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+          Copy-Item "$out/ClipFlow_${{ steps.version.outputs.version }}_x64-setup.exe" artifacts/
+          Copy-Item "$out/ClipFlow_${{ steps.version.outputs.version }}_x64_en-US.msi" artifacts/
+          Copy-Item "$out/ClipFlow_${{ steps.version.outputs.version }}_Portable.exe" artifacts/
+          Copy-Item "$out/latest.json" artifacts/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: "ClipFlow v__VERSION__"
-          releaseBody: |
-            See the assets below to download and install this version.
-            Windows: use the **NSIS setup** (recommended) or the **MSI** package.
-            Automatic updates are delivered through this release.
-          releaseDraft: false
-          prerelease: false
-          # Also upload the raw release exe so every release ships a portable
-          # build (ClipFlow_v1.1.0_Portable.exe) alongside the installers.
-          uploadPlainBinary: true
+          name: clipflow-${{ steps.version.outputs.version }}-windows
+          path: artifacts/
+          if-no-files-found: error
+
+      # Published on a tag push, or on a manual run that asked for it.
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ClipFlow ${{ steps.version.outputs.version }}
+          body: |
+            Windows installers for ClipFlow ${{ steps.version.outputs.version }}.
+
+            * **NSIS setup** (`-setup.exe`) — recommended, installs per-user and adds a Start-menu shortcut.
+            * **MSI** (`_x64_en-US.msi`) — for managed/silent deployments.
+            * **Portable** (`_Portable.exe`) — no installation, run it from anywhere.
+
+            See the changelog for what is in this release.
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          draft: false

@@ -1,0 +1,173 @@
+[package]
+name = "clipflow"
+version = "1.4.2"
+description = "ClipFlow - zero-bloat, privacy-first instant replay & game clipping for Windows"
+authors = ["ClipFlow Contributors"]
+license = "MIT"
+repository = "https://github.com/clipflow/clipflow"
+edition = "2021"
+# The GPUI stack needs `Option::map_or_default`, stabilised in Rust 1.98.0, so
+# 1.98 is the real floor - not the 1.85 that edition 2024 alone would imply.
+rust-version = "1.98"
+
+# Pure binary crate: there is no host runtime to link against any more, so the
+# `staticlib`/`cdylib` artifacts Tauri needed are gone. `rlib` is kept so the
+# unit tests live in the crate they exercise without a second target.
+[lib]
+name = "clipflow_lib"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "clipflow"
+path = "src/main.rs"
+
+[dependencies]
+# ------------------------------------------------------------------- UI stack
+# gpui-kit re-exports gpui (as `gpui`), gpui-base and gpui-component, so all
+# three must stay on the exact same gpui-pre snapshot. `=0.9.0` and the
+# committed Cargo.lock are deliberate: gpui-kit pins gpui-pre with `=` and a
+# patch bump of either crate can therefore break the lockfile.
+gpui-kit = "=0.9.0"
+
+# ------------------------------------------------------------------ Platform
+# tray-icon and global-hotkey both create a Win32 window and require a message
+# loop on the thread that creates them. They are constructed inside
+# `Application::run`, whose Windows loop is `GetMessageW(NULL)` +
+# `DispatchMessageW`, so this thread is pumped for them too.
+tray-icon = "0.26"
+global-hotkey = "0.9"
+
+# ---------------------------------------------------------- Serialization/IO
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+
+# ------------------------------------------------------------ Sync / plumbing
+parking_lot = "0.12.3"
+thiserror = "2.0.6"
+log = "0.4.22"
+env_logger = "0.11.5"
+chrono = { version = "0.4.39", features = ["clock"] }
+base64 = "0.22.1"
+# HWND acquisition from a gpui `Window`. Cross-platform crate: the trait is
+# implemented for `Window` on every backend, only the Win32 arm is used.
+raw-window-handle = "0.6"
+
+# Thumbnail encoding only - no decoders pulled in, keeps the binary tiny.
+# Must stay on the same major as gpui's `image` so `RenderImage` accepts our
+# `Frame`/`RgbaImage` values without a conversion crate.
+image = { version = "0.25.5", default-features = false, features = ["png"] }
+
+# GIF export: pure-Rust encoder + NeuQuant palette quantiser. Both are tiny
+# and dependency-free, so "share this highlight" stays a one-shot export with
+# no ffmpeg and no bundled binaries.
+gif = "0.13"
+color_quant = "1.1"
+
+# --------------------------------------------------------- UI-side Windows FFI
+# The engine pins `windows 0.58`; gpui and tray-icon pull `windows-sys 0.61`.
+# Nothing here may hand a typed HWND across that boundary - every entry point
+# in `platform/win32.rs` takes and returns `isize`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_Networking_WinHttp",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# ------------------------------------------------- Windows Graphics / Media
+# Everything below is compiled only on Windows targets. The feature list is
+# deliberately narrow so link time and binary size stay minimal.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58.0"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Power",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Variant",
+    "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+]
+
+[target.'cfg(windows)'.dependencies.windows-core]
+version = "0.58.0"
+
+[features]
+# Allows `cargo run --features headless-sim` on non-Windows dev machines: the
+# capture engine falls back to a deterministic synthetic pipeline and every
+# UI-side platform module degrades to a stub, so the whole app builds and its
+# policy tests run on macOS/Linux CI.
+default = []
+headless-sim = []
+
+# ---------------------------------------------------------------------------
+# Packaging (cargo-packager)
+# ---------------------------------------------------------------------------
+# `cargo packager --release` produces:
+#   * ClipFlow_<version>_x64-setup.exe   (NSIS)
+#   * ClipFlow_<version>_x64_en-US.msi   (WiX)
+# and the portable build is `target/release/clipflow.exe` itself.
+#
+# The config lives here rather than in a standalone `Packager.toml` on purpose:
+# this is the path where cargo-packager fills `name`, `version`, `description`,
+# `authors` and `license-file` in from the manifest above, so the shipped
+# version can never drift from the crate version.
+#
+# There is no frontend build step any more, so `before-packaging-command` only
+# has to produce the binary.
+[package.metadata.packager]
+product-name = "ClipFlow"
+identifier = "dev.clipflow.app"
+homepage = "https://github.com/jaimitus/ClipFlow"
+before-packaging-command = "cargo build --release --locked"
+formats = ["nsis", "wix"]
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.ico",
+]
+
+[[package.metadata.packager.binaries]]
+path = "clipflow"
+main = true
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+opt-level = "s"     # size first - ClipFlow ships as a single ~6 MB exe
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

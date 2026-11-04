@@ -1,18 +1,11 @@
-# Node / Web
-node_modules/
-dist/
-.DS_Store
-*.local
-
 # Release artifacts
 release_v1.0.0/
 
 # Updater signing keys (private key must NEVER be committed)
 .tauri/
 
-# Rust / Tauri
+# Rust
 target/
-src-tauri/target/
 *.pdb
 
 # IDE / Editors
@@ -22,4 +15,5 @@ src-tauri/target/
 *.swo
 
 # OS temporary
+.DS_Store
 Thumbs.db
