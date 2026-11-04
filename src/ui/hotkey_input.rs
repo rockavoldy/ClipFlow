@@ -74,7 +74,7 @@ impl Deck {
         // badge armed instead of silently doing nothing.
         if let Err(e) = crate::platform::hotkeys::validate(&chord) {
             self.recording_hotkey = None;
-            self.toast_error("Hotkey not accepted", &e);
+            self.status_error("Hotkey not accepted", &e);
             cx.notify();
             return;
         }

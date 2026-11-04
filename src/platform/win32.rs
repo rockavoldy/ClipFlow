@@ -14,6 +14,24 @@
 //! Everything here is best-effort: a failed `SetWindowDisplayAffinity` on
 //! Windows 10 pre-2004 must not abort an otherwise healthy save.
 
+use gpui_kit::App;
+
+/// Runs an HWND operation once the current gpui update has finished.
+///
+/// `ShowWindow`, `SetForegroundWindow`, `SetWindowPos` and `ShellExecuteW`
+/// dispatch window messages synchronously — `WM_NCHITTEST` among them. Called
+/// from inside an entity update they re-enter GPUI's window procedure while the
+/// `App` is mutably borrowed, which logs
+/// `RefCell already borrowed: attempted mutable App borrow` and breaks titlebar
+/// hit-testing for that message. A spawned task runs between message
+/// dispatches, where no borrow is held, so handle work goes through here.
+///
+/// `App::defer` is *not* a substitute: deferred callbacks run inside
+/// `App::flush_effects`, still under the borrow.
+pub fn defer(cx: &App, f: impl FnOnce() + 'static) {
+    cx.spawn(async move |_cx| f()).detach();
+}
+
 /// Applies (or clears) `HWND_TOPMOST`. `SetWindowPos` is used instead of
 /// `SetWindowLong` so the change also restacks the window immediately.
 #[cfg(all(windows, not(feature = "headless-sim")))]

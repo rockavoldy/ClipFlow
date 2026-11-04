@@ -12,14 +12,17 @@
 //! nothing would be worse than hiding it.
 //!
 //! Slider ranges are copied verbatim from the old panel:
-//! `bitrate 3000..60000 step 1000`, `volumes 0..100 step 5`.
+//! `volumes 0..100 step 5`. Bitrate is a numeric field instead (`3000..30000`,
+//! step `1000`): a slider cannot hit an exact kbps value and the old
+//! `3000..60000` range invited files too heavy to share.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::{
     Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::power::PowerState;
@@ -32,9 +35,9 @@ use crate::ui::theme::Palette;
 pub const BUFFER_PRESETS: [u32; 5] = [15, 30, 60, 120, 300];
 /// FPS presets from the old settings panel.
 pub const FPS_PRESETS: [u32; 4] = [30, 60, 120, 144];
-/// Bitrate slider bounds, `step 1000`.
+/// Bitrate numeric bounds, `step 1000`.
 pub const BITRATE_MIN: u32 = 3_000;
-pub const BITRATE_MAX: u32 = 60_000;
+pub const BITRATE_MAX: u32 = 30_000;
 pub const BITRATE_STEP: u32 = 1_000;
 /// Volume slider bounds, `step 5`.
 pub const VOLUME_MIN: u32 = 0;
@@ -54,8 +57,8 @@ impl Deck {
             .flex_col()
             .gap_4()
             .p_4()
-            .rounded_lg()
-            .bg(palette.panel)
+            .rounded_md()
+            .bg(palette.surface)
             .border_1()
             .border_color(palette.line)
             .child(
@@ -66,10 +69,10 @@ impl Deck {
                     .justify_between()
                     .child(
                         div()
-                            .font_family(crate::ui::theme::MONO)
-                            .text_xs()
-                            .text_color(palette.cyan)
-                            .child("SETTINGS"),
+                            .text_sm()
+                            .font_weight(crate::ui::theme::label_weight())
+                            .text_color(palette.text)
+                            .child("Settings"),
                     )
                     .child(
                         div()
@@ -87,17 +90,6 @@ impl Deck {
                                         settings.codec.as_str(),
                                         settings.bitrate_kbps / 1000
                                     )),
-                            )
-                            .child(
-                                Button::new("back-to-deck")
-                                    .secondary()
-                                    .compact()
-                                    .label("Back to deck")
-                                    .tooltip("Return to the capture card and library")
-                                    .on_click(cx.listener(|deck, _ev, _window, cx| {
-                                        deck.view = crate::ui::deck::View::Deck;
-                                        cx.notify();
-                                    })),
                             ),
                     ),
             )
@@ -218,12 +210,7 @@ impl Deck {
                         )
                     })),
             ))
-            .child(self.slider_row(
-                palette,
-                "BITRATE",
-                format!("{} kbps", settings.bitrate_kbps),
-                self.bitrate_slider.clone(),
-            ))
+            .child(self.bitrate_row(palette, cx))
             .child(self.slider_row(
                 palette,
                 "GAME VOLUME",
@@ -493,16 +480,6 @@ impl Deck {
                             })),
                     )
                     .child(
-                        Button::new("delete-all")
-                            .danger()
-                            .compact()
-                            .label("Delete all clips")
-                            .tooltip("Remove every clip in the folder. Cannot be undone.")
-                            .on_click(cx.listener(|deck, _ev, _window, cx| {
-                                deck.delete_all_clips(cx);
-                            })),
-                    )
-                    .child(
                         Button::new("simulate-loss")
                             .ghost()
                             .compact()
@@ -569,12 +546,16 @@ impl Deck {
                                     .compact()
                                     .label("Releases page")
                                     .tooltip("Open the download page in your browser")
-                                    .on_click(cx.listener(|_deck, _ev, _window, _cx| {
-                                        if let Err(e) =
-                                            crate::platform::update::open_releases_page()
-                                        {
-                                            log::warn!("[clipflow] {e}");
-                                        }
+                                    .on_click(cx.listener(|_deck, _ev, _window, cx| {
+                                        // `ShellExecuteW` pumps messages; keep it
+                                        // out of the click's borrow.
+                                        crate::platform::win32::defer(cx, || {
+                                            if let Err(e) =
+                                                crate::platform::update::open_releases_page()
+                                            {
+                                                log::warn!("[clipflow] {e}");
+                                            }
+                                        });
                                     })),
                             ),
                     ),
@@ -597,9 +578,12 @@ impl Deck {
             .gap_2()
             .child(
                 div()
-                    .font_family(crate::ui::theme::MONO)
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(palette.line)
                     .text_xs()
-                    .text_color(palette.muted)
+                    .font_weight(crate::ui::theme::label_weight())
+                    .text_color(palette.text)
                     .child(title.to_string()),
             )
             .child(body)
@@ -705,11 +689,86 @@ impl Deck {
                         div()
                             .font_family(crate::ui::theme::MONO)
                             .text_xs()
-                            .text_color(palette.cyan)
+                            .text_color(palette.text)
                             .child(value_label),
                     ),
             )
             .child(Slider::new(&state).horizontal())
+    }
+
+    /// Bitrate as an exact numeric field with steppers, not a slider: a slider
+    /// cannot land on an exact kbps value.
+    ///
+    /// The frame is drawn here (a visible `palette.line` border) because the
+    /// stock input chrome is white-on-white under this theme. Commits live in
+    /// the deck's `InputEvent` subscription, which only persists values
+    /// [`parse_bitrate`] accepts — intermediate keystrokes ("1", "12", …) are
+    /// ignored, and blur reverts rejected text (see
+    /// [`Deck::revert_bitrate_text`]).
+    fn bitrate_row(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_family(crate::ui::theme::MONO)
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child("BITRATE"),
+                    )
+                    .child(
+                        div()
+                            .font_family(crate::ui::theme::MONO)
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child("3000–30000 kbps"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .w(px(250.0))
+                    .p_1()
+                    .border_1()
+                    .border_color(palette.line)
+                    .rounded_md()
+                    .bg(palette.background)
+                    .child(
+                        Button::new("bitrate-minus")
+                            .ghost()
+                            .compact()
+                            .label("-")
+                            .tooltip("Lower the bitrate by 1000 kbps")
+                            .on_click(cx.listener(|deck, _ev, window, cx| {
+                                deck.step_bitrate(-(BITRATE_STEP as i32), window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.bitrate_input).suffix("kbps")),
+                    )
+                    .child(
+                        Button::new("bitrate-plus")
+                            .ghost()
+                            .compact()
+                            .label("+")
+                            .tooltip("Raise the bitrate by 1000 kbps")
+                            .on_click(cx.listener(|deck, _ev, window, cx| {
+                                deck.step_bitrate(BITRATE_STEP as i32, window, cx);
+                            })),
+                    ),
+            )
     }
 
     fn hotkey_row(
@@ -742,16 +801,16 @@ impl Deck {
                     .py_1()
                     .rounded_md()
                     .border_1()
-                    .border_color(if recording { palette.lime } else { palette.magenta })
+                    .border_color(if recording { palette.accent } else { palette.line })
                     .bg(if recording {
-                        palette.panel_2
+                        palette.subtle
                     } else {
-                        palette.panel
+                        palette.surface
                     })
                     .cursor_pointer()
                     .font_family(crate::ui::theme::MONO)
                     .text_xs()
-                    .text_color(if recording { palette.lime } else { palette.magenta })
+                    .text_color(if recording { palette.text } else { palette.muted })
                     .child(label)
                     .on_click(cx.listener(move |deck, _ev, window, cx| {
                         deck.begin_hotkey_capture(action, window, cx);
@@ -787,7 +846,7 @@ impl Deck {
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(palette.panel_2)
+                .bg(palette.subtle)
                 .child(
                     div()
                         .font_family(crate::ui::theme::MONO)
@@ -799,11 +858,56 @@ impl Deck {
                     div()
                         .font_family(crate::ui::theme::MONO)
                         .text_xs()
-                        .text_color(palette.amber)
+                        .text_color(palette.warn)
                         .child(eco),
                 ),
         )
     }
+}
+
+/// Builds the bitrate [`InputState`]: free typing in a plain [`Input`] plus
+/// the row's own −/+ buttons (see `bitrate_row`).
+///
+/// A plain input is deliberate: the stock `NumberInput` tracks the state's
+/// focus handle on both its outer frame and its inner editor, which reports
+/// focus twice in one frame and trips GPUI's `set_focus` assertion as soon as
+/// the field is clicked. Digits only (no regex dependency:
+/// [`InputState::validate`] takes a closure). Empty text is allowed so the
+/// field can be cleared mid-edit; [`parse_bitrate`] rejects it and blur
+/// reverts to the applied value.
+pub fn bitrate_input_state(
+    window: &mut Window,
+    cx: &mut Context<InputState>,
+    initial: u32,
+) -> InputState {
+    InputState::new(window, cx)
+        .placeholder("12000")
+        .default_value(initial.to_string())
+        .validate(|text, _| text.len() <= 5 && text.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Parses a typed bitrate for committing: surrounding whitespace, internal
+/// spaces/commas and an optional `kbps`/`k` suffix are ignored, and the value
+/// must land in [`BITRATE_MIN`]..=[`BITRATE_MAX`].
+///
+/// Returns `None` for intermediate keystrokes ("1", "12", ""), garbage and
+/// out-of-range values — the caller simply does not persist those.
+pub fn parse_bitrate(text: &str) -> Option<u32> {
+    let compact: String = text
+        .trim()
+        .chars()
+        .filter(|c| *c != ',' && !c.is_whitespace())
+        .collect();
+    let lower = compact.to_ascii_lowercase();
+    let digits = lower
+        .strip_suffix("kbps")
+        .or_else(|| lower.strip_suffix('k'))
+        .unwrap_or(&lower);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let value: u32 = digits.parse().ok()?;
+    (BITRATE_MIN..=BITRATE_MAX).contains(&value).then_some(value)
 }
 
 /// Builds the `SliderState` builder for one numeric row. The caller wraps it in
@@ -870,16 +974,38 @@ mod tests {
         // offering the values existing users expect to find.
         assert_eq!(BUFFER_PRESETS, [15, 30, 60, 120, 300]);
         assert_eq!(FPS_PRESETS, [30, 60, 120, 144]);
-        assert_eq!((BITRATE_MIN, BITRATE_MAX, BITRATE_STEP), (3_000, 60_000, 1_000));
+        assert_eq!((BITRATE_MIN, BITRATE_MAX, BITRATE_STEP), (3_000, 30_000, 1_000));
         assert_eq!((VOLUME_MIN, VOLUME_MAX, VOLUME_STEP), (0, 100, 5));
+    }
+
+    #[test]
+    fn typed_bitrates_commit_only_when_in_range() {
+        assert_eq!(parse_bitrate("12000"), Some(12_000));
+        assert_eq!(parse_bitrate("3000"), Some(BITRATE_MIN));
+        assert_eq!(parse_bitrate("30000"), Some(BITRATE_MAX));
+        // Forgiving input: whitespace, thousands separators, suffix.
+        assert_eq!(parse_bitrate(" 12,000 kbps "), Some(12_000));
+        assert_eq!(parse_bitrate("12000KBPS"), Some(12_000));
+        assert_eq!(parse_bitrate("12000k"), Some(12_000));
+        // Intermediate keystrokes, garbage and out-of-range values never save.
+        assert_eq!(parse_bitrate(""), None);
+        assert_eq!(parse_bitrate("1"), None);
+        assert_eq!(parse_bitrate("12"), None);
+        assert_eq!(parse_bitrate("12k"), None);
+        assert_eq!(parse_bitrate("2999"), None);
+        assert_eq!(parse_bitrate("30001"), None);
+        assert_eq!(parse_bitrate("abc"), None);
+        assert_eq!(parse_bitrate("12.5"), None);
+        assert_eq!(parse_bitrate("kbps"), None);
     }
 
     #[test]
     fn sliders_whose_min_exceeds_the_default_max_do_not_panic() {
         // Regression test: gpui-kit's `SliderState` starts at `max = 100.0` and
-        // re-clamps on every builder step, so building the bitrate slider
-        // (`min = 3000`) used to panic with "min > max, or either was NaN".
-        // `slider_state` must therefore apply `max` before `min`.
+        // re-clamps on every builder step, so a slider with a high minimum
+        // (as the old bitrate slider had at 3000) used to panic with
+        // "min > max, or either was NaN". `slider_state` must therefore apply
+        // `max` before `min`.
         let _ = slider_state(BITRATE_MIN, BITRATE_MAX, BITRATE_STEP, 30_000);
         let _ = slider_state(VOLUME_MIN, VOLUME_MAX, VOLUME_STEP, 50);
     }

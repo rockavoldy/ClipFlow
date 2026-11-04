@@ -199,7 +199,7 @@ pub fn start(deck: WeakEntity<Deck>, state: std::sync::Arc<AppState>, cx: &mut g
                         ("Privacy mode resumed", "A game is focused — capture is live.")
                     };
                     deck.update(cx, |deck, cx| {
-                        deck.toast_info(title, body);
+                        deck.status_info(title, body);
                         cx.notify();
                     })
                     .ok();

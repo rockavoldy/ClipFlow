@@ -7,7 +7,6 @@
 //!                │
 //!                ├── ui::deck        the single window (deck)
 //!                │     ├── capture_card   ARM/SAVE + telemetry
-//!                │     ├── library        scan/pick/open/delete
 //!                │     └── settings       one row per SettingsPatch field
 //!                │
 //!                ├── runtime::stats       4 Hz telemetry snapshot

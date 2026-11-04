@@ -518,7 +518,8 @@ impl Default for AppState {
 /// `OpenTrimmer` was decided in Rust because the hotkey path must never raise
 /// the deck mid-game. With the trimmer deferred there is nothing to open, so
 /// that field is gone on purpose rather than half-ported: the view always
-/// toasts, and raises the window only when [`safe_to_raise`] allows it.
+/// reports the result on the status line (plus a native notification), and
+/// raises the window only when [`safe_to_raise`] allows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveTrigger {
     Ui,
@@ -680,7 +681,10 @@ pub fn apply_patch_values(
         settings.target_fps = v.clamp(24, 240);
     }
     if let Some(v) = patch.bitrate_kbps {
-        settings.bitrate_kbps = v.clamp(1_000, 150_000);
+        // Matches the settings panel's numeric field (`BITRATE_MIN..=MAX` in
+        // `ui::settings`); the engine itself accepts a wider range, but the UI
+        // never offers it.
+        settings.bitrate_kbps = v.clamp(3_000, 30_000);
     }
     if let Some(v) = patch.codec {
         settings.codec = v;
@@ -858,9 +862,10 @@ pub fn privacy_blocked_message(state: &AppState, game_override: Option<&str>) ->
 ///
 /// This is the one deliberate behaviour change from the Tauri build: there the
 /// toast fired only when `open_trimmer && !safe_to_raise`, i.e. a toast was
-/// mutually exclusive with raising. Now that toasts are the only confirmation
-/// and the trimmer is gone, the save path *always* toasts and *additionally*
-/// raises when safe. Commented here so it does not read as a bug.
+/// mutually exclusive with raising. Now that the native notification plus the
+/// in-app status line are the confirmation and the trimmer is gone, the save
+/// path *always* notifies and *additionally* raises when safe. Commented here
+/// so it does not read as a bug.
 pub fn safe_to_raise() -> bool {
     let focused = crate::foreground::foreground_exe();
     safe_to_raise_for(focused.as_deref())
@@ -902,7 +907,7 @@ mod tests {
     #[test]
     fn save_trigger_strings_match_the_old_payload() {
         // The event payload used exactly these four values; log lines and
-        // toasts still key off them.
+        // notifications still key off them.
         assert_eq!(SaveTrigger::Ui.as_str(), "ui");
         assert_eq!(SaveTrigger::Hotkey.as_str(), "hotkey");
         assert_eq!(SaveTrigger::Tray.as_str(), "tray");
@@ -999,7 +1004,7 @@ mod tests {
 
         assert_eq!(s.buffer_seconds, 5);
         assert_eq!(s.target_fps, 240);
-        assert_eq!(s.bitrate_kbps, 1_000);
+        assert_eq!(s.bitrate_kbps, 3_000);
         assert_eq!(s.game_volume, 100);
         assert_eq!(s.mic_volume, 100);
         assert_eq!(s.eco_battery_threshold_pct, 5);

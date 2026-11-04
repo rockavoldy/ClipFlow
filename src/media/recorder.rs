@@ -21,6 +21,12 @@
 //! * Every frame payload lives behind an `Arc<[u8]>`, so flushing the buffer to
 //!   disk is a pointer-copy snapshot: the capture thread is blocked for tens of
 //!   microseconds, not milliseconds.
+//! * If the desktop is composited in 16-bit float (HDR, Windows 11 Auto Colour
+//!   Management, 10-bit output) the duplicates arrive as
+//!   `R16G16B16A16_FLOAT`. A full-screen pass copies those to BGRA8 first,
+//!   because several GPUs accept FP16 only as a video-processor *output*
+//!   format. The surface format is taken from the frame itself — the
+//!   `DXGI_OUTDUPL_DESC` mode description can disagree with it.
 //! * All DXGI/D3D11 error paths funnel through [`is_device_lost`] and trigger a
 //!   full, allocation-free-ish rebuild of the graphics stack while keeping the
 //!   already-captured history intact.
@@ -29,7 +35,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -467,6 +473,8 @@ struct SharedState {
     audio_drift_ms: RwLock<f32>,
     /// Shared with the audio thread, hence the `Arc`.
     ring: Arc<Mutex<RollingRingBuffer>>,
+    qpc_origin: AtomicI64,
+    qpc_freq: AtomicI64,
 }
 
 impl SharedState {
@@ -493,6 +501,20 @@ impl SharedState {
                 cfg.buffer_seconds,
                 ring_cap_mb(cfg.buffer_seconds, cfg.bitrate_kbps),
             ))),
+            qpc_origin: {
+                let mut now = 0i64;
+                unsafe {
+                    let _ = windows::Win32::System::Performance::QueryPerformanceCounter(&mut now);
+                }
+                AtomicI64::new(now)
+            },
+            qpc_freq: {
+                let mut freq = 0i64;
+                unsafe {
+                    let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut freq);
+                }
+                AtomicI64::new(if freq == 0 { 10_000_000 } else { freq })
+            },
         }
     }
 
@@ -670,6 +692,8 @@ impl CaptureEngine {
                 Arc::clone(&self.shared.ring),
                 Arc::clone(&self.shared.generation),
                 Arc::clone(&self.audio_error),
+                self.shared.qpc_origin.load(Ordering::Acquire),
+                self.shared.qpc_freq.load(Ordering::Acquire),
             ) {
                 Ok(a) => *self.audio.lock() = Some(a),
                 Err(e) => {
@@ -879,6 +903,24 @@ mod win {
         RecorderError::Win(format!("{} (0x{:08X})", e.message(), e.code().0 as u32))
     }
 
+    /// `E_UNEXPECTED` (`0x8000FFFF`). Some hardware MFTs return this instead of
+    /// `MF_E_TRANSFORM_NEED_MORE_INPUT` when `ProcessOutput` is called without
+    /// a matching `METransformHaveOutput` event. It is not fatal — it means
+    /// "nothing to give you right now".
+    const E_UNEXPECTED: windows::core::HRESULT = windows::core::HRESULT(0x8000_FFFFu32 as i32);
+
+    /// DuplicateOutput may report the sRGB variant in `ModeDesc` while handing
+    /// back a plain UNORM surface (or vice versa). They are the same surface for
+    /// our purposes.
+    fn same_surface_format(a: DXGI_FORMAT, b: DXGI_FORMAT) -> bool {
+        a == b
+            || matches!(
+                (a, b),
+                (DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+                    | (DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM)
+            )
+    }
+
     /// The four HRESULTs that mean "throw everything away and start over".
     pub(super) fn is_device_lost(e: &windows::core::Error) -> bool {
         let c = e.code();
@@ -951,7 +993,6 @@ mod win {
         pub device: ID3D11Device,
         pub context: ID3D11DeviceContext,
         pub duplication: IDXGIOutputDuplication,
-        pub desc: DXGI_OUTDUPL_DESC,
         pub adapter_name: String,
         pub vram_mb: u64,
         pub src_width: u32,
@@ -1059,7 +1100,6 @@ mod win {
                 device,
                 context,
                 duplication,
-                desc,
                 adapter_name,
                 vram_mb: (adesc.DedicatedVideoMemory / (1024 * 1024)) as u64,
             })
@@ -1082,19 +1122,23 @@ mod win {
         enumerator: ID3D11VideoProcessorEnumerator,
         pub nv12: ID3D11Texture2D,
         out_view: ID3D11VideoProcessorOutputView,
-        _dst_w: u32,
-        _dst_h: u32,
+        /// Set when the surface format cannot be read by the processor and has
+        /// to be copied to BGRA8 first.
+        pre: Option<FloatToBgra>,
+        src_w: u32,
+        src_h: u32,
+        src_format: DXGI_FORMAT,
+        dst_w: u32,
+        dst_h: u32,
     }
 
     impl ColorConverter {
-        pub fn size(&self) -> (u32, u32) {
-            (self._dst_w, self._dst_h)
-        }
         pub fn new(
             device: &ID3D11Device,
             context: &ID3D11DeviceContext,
             src_w: u32,
             src_h: u32,
+            src_format: DXGI_FORMAT,
             dst_w: u32,
             dst_h: u32,
             fps: u32,
@@ -1103,6 +1147,8 @@ mod win {
                 let vdevice: ID3D11VideoDevice = device.cast().map_err(hr)?;
                 let vcontext: ID3D11VideoContext = context.cast().map_err(hr)?;
 
+                // `src_format` is the format of the frame that actually arrived,
+                // not the mode description — the two can disagree.
                 let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                     InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                     InputFrameRate: DXGI_RATIONAL { Numerator: fps, Denominator: 1 },
@@ -1117,17 +1163,46 @@ mod win {
                 let enumerator = vdevice
                     .CreateVideoProcessorEnumerator(&content_desc)
                     .map_err(hr)?;
+
+                // The processor has to be able to *read* the desktop surface.
+                // Some GPUs accept 16-bit float only as an output format; those
+                // frames are copied to BGRA8 first, which every video processor
+                // can read.
+                let supports_input = |fmt: DXGI_FORMAT| -> RResult<bool> {
+                    let support = enumerator.CheckVideoProcessorFormat(fmt).map_err(hr)?;
+                    Ok(support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0 as u32 != 0)
+                };
+
+                let pre = if supports_input(src_format)? {
+                    None
+                } else if src_format == DXGI_FORMAT_R16G16B16A16_FLOAT
+                    && supports_input(DXGI_FORMAT_B8G8R8A8_UNORM)?
+                {
+                    // The duplication surface is linear scRGB in this case.
+                    Some(FloatToBgra::new(device, context, src_w, src_h, true)?)
+                } else {
+                    return Err(RecorderError::Other(format!(
+                        "the GPU video processor cannot read {src_format:?} \
+                         (HDR desktop? disable HDR or use the GPU that drives the display)"
+                    )));
+                };
+
                 let processor = vdevice
                     .CreateVideoProcessor(&enumerator, 0)
                     .map_err(hr)?;
 
                 // Game capture is full-range RGB going to limited-range NV12;
                 // getting this wrong is the classic "washed out clip" bug.
+                // Bitfield layout: Usage:1, RGB_Range:1, YCbCr_Matrix:1,
+                // YCbCr_xvYCC:1, Nominal_Range:2.
                 let in_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-                    _bitfield: 0x0000_0001, // Usage = playback, RGB_Range = full
+                    // Usage = playback, RGB_Range = full (0-255).
+                    _bitfield: 0x0000_0002,
                 };
                 let out_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-                    _bitfield: 0x0000_0004, // Nominal_Range = 16-235, BT.709
+                    // Usage = playback, YCbCr_Matrix = BT.709, Nominal_Range =
+                    // 16-235 (limited).
+                    _bitfield: 0x0000_0014,
                 };
                 vcontext.VideoProcessorSetStreamColorSpace(&processor, 0, &in_cs);
                 vcontext.VideoProcessorSetOutputColorSpace(&processor, &out_cs);
@@ -1175,15 +1250,56 @@ mod win {
                     enumerator,
                     nv12,
                     out_view,
-                    _dst_w: dst_w,
-                    _dst_h: dst_h,
+                    pre,
+                    src_w,
+                    src_h,
+                    src_format,
+                    dst_w,
+                    dst_h,
                 })
             }
+        }
+
+        /// True when this converter can handle `src` without being rebuilt.
+        pub fn accepts(&self, src: &ID3D11Texture2D) -> bool {
+            let mut d = D3D11_TEXTURE2D_DESC::default();
+            unsafe { src.GetDesc(&mut d) };
+            d.Width == self.src_w
+                && d.Height == self.src_h
+                && same_surface_format(d.Format, self.src_format)
         }
 
         /// One `VideoProcessorBlt` = colour convert + scale + (optional) crop.
         pub fn convert(&self, src: &ID3D11Texture2D) -> RResult<()> {
             unsafe {
+                let mut src_desc = D3D11_TEXTURE2D_DESC::default();
+                src.GetDesc(&mut src_desc);
+                if src_desc.Width != self.src_w
+                    || src_desc.Height != self.src_h
+                    || !same_surface_format(src_desc.Format, self.src_format)
+                {
+                    // The desktop changed resolution/format without
+                    // DuplicateOutput reporting a loss. The processor's input
+                    // description is stale; the caller rebuilds the converter.
+                    return Err(RecorderError::Other(format!(
+                        "input changed: {}x{} {:?} -> {}x{} {:?}",
+                        self.src_w,
+                        self.src_h,
+                        self.src_format,
+                        src_desc.Width,
+                        src_desc.Height,
+                        src_desc.Format
+                    )));
+                }
+
+                let input: &ID3D11Texture2D = match &self.pre {
+                    Some(pre) => {
+                        pre.run(src)?;
+                        pre.texture()
+                    }
+                    None => src,
+                };
+
                 let ivd = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                     FourCC: 0,
                     ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -1196,7 +1312,7 @@ mod win {
                 };
                 let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
                 self.vdevice
-                    .CreateVideoProcessorInputView(src, &self.enumerator, &ivd, Some(&mut in_view))
+                    .CreateVideoProcessorInputView(input, &self.enumerator, &ivd, Some(&mut in_view))
                     .map_err(hr)?;
                 let in_view =
                     in_view.ok_or_else(|| RecorderError::Other("no vp input view".into()))?;
@@ -1211,12 +1327,258 @@ mod win {
                     ..Default::default()
                 };
 
-                let result = self
-                    .vcontext
-                    .VideoProcessorBlt(&self.processor, &self.out_view, 0, &[stream]);
-
-                result.map_err(hr)
+                self.vcontext
+                    .VideoProcessorBlt(&self.processor, &self.out_view, 0, &[stream])
+                    .map_err(|e| {
+                        RecorderError::Win(format!(
+                            "{} (0x{:08X}) [{}x{} {:?} -> {}x{} NV12]",
+                            e.message(),
+                            e.code().0 as u32,
+                            src_desc.Width,
+                            src_desc.Height,
+                            src_desc.Format,
+                            self.dst_w,
+                            self.dst_h
+                        ))
+                    })
             }
+        }
+    }
+
+    // ------------------------------------- FP16 desktop ➜ BGRA8 (shader copy)
+    //
+    // Desktop Duplication hands back `R16G16B16A16_FLOAT` whenever the desktop
+    // is composited in 16-bit float — HDR, Windows 11 Auto Color Management, or
+    // a 10-bit output. That format is *output-only* on the video processor on
+    // several GPUs (verified on NVIDIA: `CheckVideoProcessorFormat` reports
+    // OUTPUT without INPUT, and creating an input view fails with E_INVALIDARG),
+    // so the BGRA ➜ NV12 path cannot read the surface directly.
+    //
+    // One full-screen pass converts the frame to BGRA8, after which the normal
+    // video-processor pipeline works unchanged. The desktop payload is linear
+    // scRGB, so the pass applies the sRGB transfer function on the way out.
+    pub(super) struct FloatToBgra {
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        vs: ID3D11VertexShader,
+        ps: ID3D11PixelShader,
+        sampler: ID3D11SamplerState,
+        target: ID3D11Texture2D,
+        rtv: ID3D11RenderTargetView,
+        width: u32,
+        height: u32,
+    }
+
+    const COPY_HLSL: &str = r#"
+#if APPLY_SRGB
+float3 encode(float3 c) {
+    c = saturate(c);
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+#else
+float3 encode(float3 c) { return saturate(c); }
+#endif
+
+Texture2D<float4> Src : register(t0);
+SamplerState Samp : register(s0);
+
+struct VSOut {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+
+// Full-screen triangle: no vertex buffer, no index buffer.
+VSOut VSMain(uint id : SV_VertexID) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    VSOut o;
+    o.uv = uv;
+    o.pos = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_Target {
+    float4 c = Src.SampleLevel(Samp, i.uv, 0);
+    return float4(encode(c.rgb), 1.0);
+}
+"#;
+
+    fn compile_shader(source: &str, entry: &str, target: &str) -> RResult<Vec<u8>> {
+        use windows::Win32::Graphics::Direct3D::Fxc::{
+            D3DCompile, D3DCOMPILE_OPTIMIZATION_LEVEL3,
+        };
+        use windows::Win32::Graphics::Direct3D::{ID3DBlob, ID3DInclude};
+
+        let entry_c = std::ffi::CString::new(entry)
+            .map_err(|e| RecorderError::Other(format!("shader entry: {e}")))?;
+        let target_c = std::ffi::CString::new(target)
+            .map_err(|e| RecorderError::Other(format!("shader target: {e}")))?;
+
+        unsafe {
+            let mut code: Option<ID3DBlob> = None;
+            let mut errors: Option<ID3DBlob> = None;
+            let result = D3DCompile(
+                source.as_ptr() as *const core::ffi::c_void,
+                source.len(),
+                windows::core::PCSTR(c"clipflow".as_ptr() as *const u8),
+                None,
+                None::<&ID3DInclude>,
+                windows::core::PCSTR(entry_c.as_ptr() as *const u8),
+                windows::core::PCSTR(target_c.as_ptr() as *const u8),
+                D3DCOMPILE_OPTIMIZATION_LEVEL3,
+                0,
+                &mut code,
+                Some(&mut errors),
+            );
+            if let Err(e) = result {
+                let detail = errors
+                    .as_ref()
+                    .map(|blob| {
+                        let bytes = std::slice::from_raw_parts(
+                            blob.GetBufferPointer() as *const u8,
+                            blob.GetBufferSize(),
+                        );
+                        String::from_utf8_lossy(bytes).into_owned()
+                    })
+                    .unwrap_or_default();
+                return Err(RecorderError::Other(format!(
+                    "shader compile ({entry}): {e}: {}",
+                    detail.trim()
+                )));
+            }
+            let code = code.ok_or_else(|| RecorderError::Other("no shader bytecode".into()))?;
+            Ok(std::slice::from_raw_parts(
+                code.GetBufferPointer() as *const u8,
+                code.GetBufferSize(),
+            )
+            .to_vec())
+        }
+    }
+
+    impl FloatToBgra {
+        pub fn new(
+            device: &ID3D11Device,
+            context: &ID3D11DeviceContext,
+            width: u32,
+            height: u32,
+            apply_srgb: bool,
+        ) -> RResult<Self> {
+            unsafe {
+                let source = format!("#define APPLY_SRGB {}\n{COPY_HLSL}", u8::from(apply_srgb));
+                let vs_code = compile_shader(&source, "VSMain", "vs_5_0")?;
+                let ps_code = compile_shader(&source, "PSMain", "ps_5_0")?;
+
+                let mut vs: Option<ID3D11VertexShader> = None;
+                device
+                    .CreateVertexShader(&vs_code, None::<&ID3D11ClassLinkage>, Some(&mut vs))
+                    .map_err(hr)?;
+                let vs = vs.ok_or_else(|| RecorderError::Other("no vertex shader".into()))?;
+
+                let mut ps: Option<ID3D11PixelShader> = None;
+                device
+                    .CreatePixelShader(&ps_code, None::<&ID3D11ClassLinkage>, Some(&mut ps))
+                    .map_err(hr)?;
+                let ps = ps.ok_or_else(|| RecorderError::Other("no pixel shader".into()))?;
+
+                let samp_desc = D3D11_SAMPLER_DESC {
+                    Filter: D3D11_FILTER_MIN_MAG_MIP_POINT,
+                    AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    ComparisonFunc: D3D11_COMPARISON_NEVER,
+                    MinLOD: 0.0,
+                    MaxLOD: D3D11_FLOAT32_MAX,
+                    ..Default::default()
+                };
+                let mut sampler: Option<ID3D11SamplerState> = None;
+                device
+                    .CreateSamplerState(&samp_desc, Some(&mut sampler))
+                    .map_err(hr)?;
+                let sampler =
+                    sampler.ok_or_else(|| RecorderError::Other("no sampler state".into()))?;
+
+                let target_desc = D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut target: Option<ID3D11Texture2D> = None;
+                device
+                    .CreateTexture2D(&target_desc, None, Some(&mut target))
+                    .map_err(hr)?;
+                let target =
+                    target.ok_or_else(|| RecorderError::Other("no copy texture".into()))?;
+
+                let mut rtv: Option<ID3D11RenderTargetView> = None;
+                device
+                    .CreateRenderTargetView(&target, None, Some(&mut rtv))
+                    .map_err(hr)?;
+                let rtv = rtv.ok_or_else(|| RecorderError::Other("no render target".into()))?;
+
+                Ok(Self {
+                    device: device.clone(),
+                    context: context.clone(),
+                    vs,
+                    ps,
+                    sampler,
+                    target,
+                    rtv,
+                    width,
+                    height,
+                })
+            }
+        }
+
+        pub fn texture(&self) -> &ID3D11Texture2D {
+            &self.target
+        }
+
+        pub fn run(&self, src: &ID3D11Texture2D) -> RResult<()> {
+            unsafe {
+                let mut srv: Option<ID3D11ShaderResourceView> = None;
+                self.device
+                    .CreateShaderResourceView(src, None, Some(&mut srv))
+                    .map_err(hr)?;
+                let srv =
+                    srv.ok_or_else(|| RecorderError::Other("no source view".into()))?;
+
+                self.context.OMSetRenderTargets(
+                    Some(&[Some(self.rtv.clone())]),
+                    None::<&ID3D11DepthStencilView>,
+                );
+                self.context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                    TopLeftX: 0.0,
+                    TopLeftY: 0.0,
+                    Width: self.width as f32,
+                    Height: self.height as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }]));
+                self.context.VSSetShader(&self.vs, None);
+                self.context.PSSetShader(&self.ps, None);
+                self.context.PSSetShaderResources(0, Some(&[Some(srv)]));
+                self.context
+                    .PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+                self.context.Draw(3, 0);
+
+                // Unbind: the video processor reads this texture next, and an
+                // active render-target binding would be a read/write hazard.
+                self.context.PSSetShaderResources(0, Some(&[None]));
+                self.context.OMSetRenderTargets(
+                    None::<&[Option<ID3D11RenderTargetView>]>,
+                    None::<&ID3D11DepthStencilView>,
+                );
+            }
+            Ok(())
         }
     }
 
@@ -1229,6 +1591,7 @@ mod win {
         pub header: VideoFormatHeader,
         async_mode: bool,
         pending_input: u32,
+        pending_output: u32,
         width: u32,
         height: u32,
         fps: u32,
@@ -1461,6 +1824,7 @@ mod win {
                     },
                     async_mode,
                     pending_input: 0,
+                    pending_output: 0,
                     width,
                     height,
                     fps,
@@ -1522,67 +1886,111 @@ mod win {
         pub fn drain(&mut self, mut sink: impl FnMut(Vec<u8>, i64, i64, bool)) -> RResult<()> {
             unsafe {
                 if self.async_mode {
-                    self.pump_events(false)?;
+                    // An async MFT only produces output in response to a
+                    // `METransformHaveOutput` event. Calling `ProcessOutput`
+                    // without one makes some drivers (NVENC / AMF / QSV) return
+                    // `E_UNEXPECTED`, which used to surface as
+                    // "Catastrophic failure" in the log.
+                    if self.pending_output == 0 {
+                        self.pump_events(false)?;
+                    }
+                    while self.pending_output > 0 {
+                        self.pending_output -= 1;
+                        match self.process_output(&mut sink) {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    return Ok(());
                 }
 
                 loop {
-                    let mut status = 0u32;
-                    let mut out = [MFT_OUTPUT_DATA_BUFFER {
-                        dwStreamID: 0,
-                        pSample: std::mem::ManuallyDrop::new(None),
-                        dwStatus: 0,
-                        pEvents: std::mem::ManuallyDrop::new(None),
-                    }];
-
-                    match self.transform.ProcessOutput(0, &mut out, &mut status) {
-                        Ok(()) => {}
-                        Err(e)
-                            if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT
-                                || e.code() == MF_E_TRANSFORM_STREAM_CHANGE =>
-                        {
-                            if e.code() == MF_E_TRANSFORM_STREAM_CHANGE {
-                                self.renegotiate_output()?;
-                                continue;
-                            }
-                            return Ok(());
-                        }
-                        Err(e) => return Err(hr(e)),
+                    match self.process_output(&mut sink) {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(()),
+                        Err(e) => return Err(e),
                     }
-
-                    let sample = match std::mem::ManuallyDrop::take(&mut out[0].pSample) {
-                        Some(s) => s,
-                        None => return Ok(()),
-                    };
-
-                    let pts = sample.GetSampleTime().unwrap_or(0);
-                    let dur = sample
-                        .GetSampleDuration()
-                        .unwrap_or(HNS_PER_SECOND / self.fps.max(1) as i64);
-                    let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1;
-
-                    let buffer = sample.ConvertToContiguousBuffer().map_err(hr)?;
-                    let mut ptr: *mut u8 = std::ptr::null_mut();
-                    let mut max_len = 0u32;
-                    let mut cur_len = 0u32;
-                    buffer
-                        .Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))
-                        .map_err(hr)?;
-                    let payload = std::slice::from_raw_parts(ptr, cur_len as usize).to_vec();
-                    let _ = buffer.Unlock();
-
-                    sink(payload, pts, dur, keyframe);
                 }
             }
         }
 
-        /// Async MFT event pump. `block` waits (bounded) for the next event.
+        /// Pulls at most one access unit.
+        ///
+        /// `Ok(true)` means a sample was delivered; `Ok(false)` means the MFT
+        /// needs more input, renegotiated its output type, or handed back an
+        /// empty buffer.
+        unsafe fn process_output(
+            &mut self,
+            sink: &mut impl FnMut(Vec<u8>, i64, i64, bool),
+        ) -> RResult<bool> {
+            let mut status = 0u32;
+            let mut out = [MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: 0,
+                pSample: std::mem::ManuallyDrop::new(None),
+                dwStatus: 0,
+                pEvents: std::mem::ManuallyDrop::new(None),
+            }];
+
+            match self.transform.ProcessOutput(0, &mut out, &mut status) {
+                Ok(()) => {}
+                // Some drivers return `E_UNEXPECTED` instead of
+                // `MF_E_TRANSFORM_NEED_MORE_INPUT` when called without a
+                // matching output event. Both mean "nothing right now".
+                Err(e)
+                    if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT
+                        || e.code() == E_UNEXPECTED =>
+                {
+                    return Ok(false)
+                }
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    self.renegotiate_output()?;
+                    return Ok(false);
+                }
+                Err(e) => return Err(hr(e)),
+            }
+
+            let sample = match std::mem::ManuallyDrop::take(&mut out[0].pSample) {
+                Some(s) => s,
+                None => return Ok(false),
+            };
+
+            let pts = sample.GetSampleTime().unwrap_or(0);
+            let dur = sample
+                .GetSampleDuration()
+                .unwrap_or(HNS_PER_SECOND / self.fps.max(1) as i64);
+            let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1;
+
+            let buffer = sample.ConvertToContiguousBuffer().map_err(hr)?;
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut max_len = 0u32;
+            let mut cur_len = 0u32;
+            buffer
+                .Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))
+                .map_err(hr)?;
+            let payload = std::slice::from_raw_parts(ptr, cur_len as usize).to_vec();
+            let _ = buffer.Unlock();
+
+            sink(payload, pts, dur, keyframe);
+            Ok(true)
+        }
+
+        /// Async MFT event pump.
+        ///
+        /// `block` waits for the first event and keeps going until the MFT
+        /// grants an input slot. Without `block` it drains everything already
+        /// queued, counting both input credits and pending outputs.
         unsafe fn pump_events(&mut self, block: bool) -> RResult<()> {
             let Some(gen) = self.events.clone() else {
                 self.pending_input = 1;
                 return Ok(());
             };
 
-            let flags = if block { 0 } else { MF_EVENT_FLAG_NO_WAIT.0 as u32 };
+            let mut flags = if block {
+                0
+            } else {
+                MF_EVENT_FLAG_NO_WAIT.0 as u32
+            };
             loop {
                 let evt = match gen.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(flags)) {
                     Ok(e) => e,
@@ -1593,13 +2001,21 @@ mod win {
                 let kind = evt.GetType().unwrap_or(0);
                 match me_transform_need_input_or(kind) {
                     EventKind::NeedInput => {
-                        self.pending_input += 1;
-                        return Ok(());
+                        self.pending_input = self.pending_input.saturating_add(1);
+                        if block {
+                            return Ok(());
+                        }
                     }
-                    EventKind::HaveOutput => return Ok(()),
+                    EventKind::HaveOutput => {
+                        self.pending_output = self.pending_output.saturating_add(1);
+                    }
                     EventKind::DrainComplete => return Ok(()),
-                    EventKind::Other => continue,
+                    EventKind::Other => {}
                 }
+
+                // After the first (possibly blocking) event, consume the rest
+                // of the queue without waiting.
+                flags = MF_EVENT_FLAG_NO_WAIT.0 as u32;
             }
         }
 
@@ -1789,6 +2205,8 @@ mod win {
                         0x29, // AAC-LC L2
                     )
                     .map_err(hr)?;
+                let cfg = crate::media::audio::aac_decoder_config();
+                atype.SetBlob(&MF_MT_USER_DATA, &cfg).map_err(hr)?;
                 let s = writer.AddStream(&atype).map_err(hr)?;
                 writer.SetInputMediaType(s, &atype, None).map_err(hr)?;
                 Some(s)
@@ -1907,23 +2325,12 @@ mod win {
             let dst_w = if cfg.width == 0 { gfx.src_width } else { cfg.width } & !1;
             let dst_h = if cfg.height == 0 { gfx.src_height } else { cfg.height } & !1;
 
-            let converter = match ColorConverter::new(
-                &gfx.device,
-                &gfx.context,
-                gfx.src_width,
-                gfx.src_height,
-                dst_w,
-                dst_h,
-                cfg.target_fps,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    shared.fail(format!("video processor: {e}"));
-                    std::thread::sleep(Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(2_000);
-                    continue 'outer;
-                }
-            };
+            // The surface format is only known once a real frame arrives: DXGI
+            // can report `ModeDesc.Format = R16G16B16A16_FLOAT` and still hand
+            // back BGRA8 surfaces (10-bit / HDR-capable desktops do exactly
+            // that), so the converter is built from the first actual frame
+            // instead of from the mode description.
+            let mut converter: Option<ColorConverter> = None;
 
             let mut encoder = match HardwareEncoder::create(
                 &gfx.device,
@@ -1949,7 +2356,6 @@ mod win {
             *fmt.lock() = Some(encoder.header.clone());
             *shared.last_error.write() = None;
             shared.set_state(EngineState::Buffering);
-            backoff_ms = 40;
 
             let generation = shared.generation.load(Ordering::Acquire);
             let frame_interval = Duration::from_secs_f64(1.0 / cfg.target_fps.max(1) as f64);
@@ -2014,7 +2420,14 @@ mod win {
                 let mut texture: Option<ID3D11Texture2D> = None;
                 match acquire {
                     Ok(()) => {
-                        if let Some(res) = resource.as_ref() {
+                        // `AccumulatedFrames == 0` means nothing was presented
+                        // since the last acquire. The very first frame after
+                        // arming looks like that and carries an empty surface in
+                        // a different format, so it must never reach the
+                        // converter.
+                        if frame_info.AccumulatedFrames == 0 || resource.is_none() {
+                            texture = last_texture.clone();
+                        } else if let Some(res) = resource.as_ref() {
                             match res.cast::<ID3D11Texture2D>() {
                                 Ok(t) => {
                                     last_texture = Some(t.clone());
@@ -2060,10 +2473,54 @@ mod win {
                     // a key frame so the buffer restarts cleanly.
                     if shared.privacy_gate.load(Ordering::Acquire) {
                         was_gated = true;
-                    } else if let Err(e) = converter.convert(tex) {
-                        log::warn!("[clipflow] color convert failed: {e}");
-                        shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                     } else {
+                        // Build the converter from the surface we actually got,
+                        // and rebuild it (cheaply) if the desktop switches
+                        // format underneath us.
+                        if !converter.as_ref().is_some_and(|c| c.accepts(tex)) {
+                            let mut desc = D3D11_TEXTURE2D_DESC::default();
+                            unsafe { tex.GetDesc(&mut desc) };
+                            match ColorConverter::new(
+                                &gfx.device,
+                                &gfx.context,
+                                desc.Width,
+                                desc.Height,
+                                desc.Format,
+                                dst_w,
+                                dst_h,
+                                cfg.target_fps,
+                            ) {
+                                Ok(c) => converter = Some(c),
+                                Err(e) => {
+                                    shared.fail(format!("video processor: {e}"));
+                                    let _ = unsafe { gfx.duplication.ReleaseFrame() };
+                                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                                    backoff_ms = (backoff_ms * 2).min(2_000);
+                                    continue 'outer;
+                                }
+                            }
+                        }
+
+                        let conv = converter.as_ref().expect("converter built above");
+                        if let Err(e) = conv.convert(tex) {
+                            log::warn!("[clipflow] color convert failed: {e}");
+                            shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+
+                            // Last-resort recovery: the surface changed while we
+                            // were converting. Rebuild the whole stack instead of
+                            // dropping frames forever.
+                            let _ = unsafe { gfx.duplication.ReleaseFrame() };
+                            shared.set_state(EngineState::Recovering);
+                            encoder.flush();
+                            std::thread::sleep(Duration::from_millis(backoff_ms));
+                            backoff_ms = (backoff_ms * 2).min(2_000);
+                            continue 'outer;
+                        }
+
+                        // A successful conversion is the first proof that this
+                        // stack actually works, so only now is it safe to reset
+                        // the rebuild backoff.
+                        backoff_ms = 40;
                         if was_gated {
                             force_key = true;
                             was_gated = false;
@@ -2072,9 +2529,7 @@ mod win {
                         let submit_ns = submit_start.elapsed().as_nanos() as u64;
                         let encode_start = Instant::now();
 
-                        if let Err(e) =
-                            encoder.submit(&converter.nv12, pts, frame_hns, force_key)
-                        {
+                        if let Err(e) = encoder.submit(&conv.nv12, pts, frame_hns, force_key) {
                             log::warn!("[clipflow] encoder submit failed: {e}");
                             shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                         } else {
@@ -2125,6 +2580,7 @@ mod win {
         shared.set_state(EngineState::Idle);
         shared.running.store(false, Ordering::Release);
     }
+
 }
 
 // ===========================================================================

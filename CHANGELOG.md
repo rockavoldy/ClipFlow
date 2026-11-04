@@ -13,20 +13,23 @@ IPC layer are gone.
 - **Native UI (gpui-kit 0.9 / gpui-pre 0.3.11).** One window, one Rust view tree.
   No WebView2 runtime, no Node build step, no IPC bridge. The release artifact
   is a single `clipflow.exe` plus the usual NSIS/MSI installers.
+- **Neutral, barebones UI.** The neon cyan/magenta/lime palette and the brand
+  logotype are gone. The deck is light-only: white content, `#F3F3F3`
+  titlebar/footer, one-pixel `#DEDEDE` borders, near-black filled buttons and
+  Segoe UI / Consolas. Hue is reserved for status (armed green, warning amber,
+  error red).
+- **Native Win32 window chrome.** The frameless custom titlebar is gone, along
+  with its Hide and Quit buttons. Windows draws close, minimize and maximize,
+  and the window title is `ClipFlow`.
 - **`settings.json` is byte-compatible.** Same path (`%APPDATA%\ClipFlow`), same
   field names and clamps; an existing install keeps its settings, hotkeys,
   favourites and tags. Fields belonging to deferred features are still persisted
   and simply unused.
-- **Gallery view state** moved from `localStorage` to
-  `%APPDATA%\ClipFlow\gallery_state.json`, same JSON shape and the same
-  sanitising rules.
 - **Save feedback is inverted on purpose.** Previously a toast appeared only when
   the trimmer was *not* going to open. Now every hotkey/tray save raises a native
   toast, and the deck is raised *in addition* only when the foreground is
   positively ClipFlow or the desktop. This is the documented behaviour change
   from the migration Q&A, not a regression.
-- **The clip library is a virtualised list** rather than a multi-column grid:
-  fewer clips per screen, but smooth at thousands of files.
 - **Build requirements:** Rust **1.98+** (edition 2021), Visual Studio C++ build
   tools + Windows SDK. Node.js is no longer required. The floor is 1.98
   because the GPUI stack uses `Option::map_or_default`, stabilised in 1.98.0.
@@ -34,6 +37,44 @@ IPC layer are gone.
   as a Windows resource, so the `.exe`, the Start-menu shortcut and the installed
   application show the ClipFlow icon instead of the generic Windows one. The
   NSIS installer carries the same icon.
+
+### Fixed
+
+- **Hardware encoders no longer log “Catastrophic failure”.** Async Media
+  Foundation transforms are now asked for output only after a
+  `METransformHaveOutput` event, and `E_UNEXPECTED` is treated as “nothing to
+  hand over yet” instead of a fatal drain error.
+- **Colour conversion uses the surface DXGI actually returns.** `DXGI_OUTDUPL_DESC`
+  can advertise `R16G16B16A16_FLOAT` while the duplicates are plain BGRA8 (seen on
+  a 10-bit NVIDIA desktop): the video processor was built for FP16, so every
+  input view failed with `E_INVALIDARG` — the `color convert failed` log spam —
+  or, after the input-support check was added, arming failed outright with
+  “the GPU video processor cannot read DXGI_FORMAT(10)”. The converter is now
+  built from the first real frame instead of the mode description, and rebuilt
+  in place if the format changes. Frames with `AccumulatedFrames == 0` (the
+  first frame after arming is one, and it carries an empty FP16 surface) are
+  skipped. If a surface really is 16-bit float, it is copied to BGRA8 by a
+  full-screen shader pass first, because several GPUs (including NVIDIA) accept
+  FP16 only as a video-processor *output* format. The RGB/YUV range bits were
+  also corrected, and an unreadable surface format reports itself instead of a
+  bare HRESULT.
+- **Window controls stay clickable.** `ShowWindow`, `SetForegroundWindow`,
+  `SetWindowPos` and `ShellExecuteW` dispatch window messages *synchronously* —
+  `WM_NCHITTEST` among them. They were called from inside entity updates (tray
+  click, save-time raise, settings save, close-to-tray), so GPUI's window
+  procedure re-entered while the `App` was mutably borrowed and logged
+  `RefCell already borrowed: attempted mutable App borrow` at
+  `hit-testing window controls`. That message's hit test then returned nothing,
+  which is also the best explanation for the earlier "click twice to hit a
+  button" reports. Handle work now goes through `platform::win32::defer`, which
+  runs it from a spawned task — between message dispatches, where no borrow is
+  held.
+- **Microphone capture works with strict drivers.** The mic endpoint was opened
+  with `AUDCLNT_STREAMFLAGS_EVENTCALLBACK` but no event handle, which makes
+  `Start` fail with `AUDCLNT_E_EVENTHANDLE_NOT_SET` on some drivers. Capture is
+  polled, so the flag is gone. When the default endpoint is missing or disabled
+  the code now tries every active device, and privacy/exclusive-use failures
+  explain how to fix them.
 
 ### Deferred (documented regressions, tracked for follow-ups)
 

@@ -5,11 +5,9 @@
 //!
 //! * [`theme`] — the palette and the component-theme override
 //! * [`format`] — number/time strings, shared with tests
-//! * [`capture`] — the pure SAVE-gate and telemetry logic
-//! * [`chrome`] — titlebar, capture section, toasts, footer
-//! * [`library`] — clip list, filters, selection wiring
+//! * [`capture_card`] — the pure SAVE-gate, telemetry and capture card
 //! * [`settings`] — one row per `SettingsPatch` field
-//! * [`thumbs`] — PNG bytes → `RenderImage` cache
+//! * [`hotkey_input`] — the click-then-press hotkey recorder
 
 pub mod capture_card;
 pub mod deck;
@@ -17,7 +15,5 @@ pub mod deck;
 mod deck_tests;
 pub mod format;
 pub mod hotkey_input;
-pub mod library;
 pub mod settings;
 pub mod theme;
-pub mod thumbs;

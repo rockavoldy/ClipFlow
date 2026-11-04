@@ -46,8 +46,8 @@ Designed for gamers and creators who demand maximum FPS and instant clipping wit
 ## ✨ Key Features
 
 - **⚡ Sub-50ms Instant Clip Flush:** Snapshot your last 30–120 seconds of gameplay to `%USERPROFILE%\Videos\ClipFlow` in under 50 ms. Zero rendering queues or waiting.
-- **🎮 Per-Game Capture Settings:** Clips are tagged with the foreground game and, optionally, routed into `Videos/ClipFlow/<game>/`. Filter the gallery by game and auto-save the last 30 s when a game exits focus. *(The profile editor UI is deferred; profiles still seed, persist and apply.)*
-- **🏷️ Game-Tagged Clips & Folders:** Every save is tagged with the game in the foreground and (optionally) routed into `Videos/ClipFlow/<game>/`. Filter the gallery by game, read per-game stats in the STATS tab, and auto-save the last 30 s whenever a game exits focus.
+- **🎮 Per-Game Capture Settings:** Clips are tagged with the foreground game and, optionally, routed into `Videos/ClipFlow/<game>/`, and the last 30 s can be saved automatically when a game exits focus. *(The profile editor UI is deferred; profiles still seed, persist and apply.)*
+- **🏷️ Game-Tagged Clips & Folders:** Every save is tagged with the game in the foreground and (optionally) routed into `Videos/ClipFlow/<game>/`. Auto-save the last 30 s whenever a game exits focus.
 - **🔇 Game-Focus Friendly:** Saving with `Alt + C` never steals focus from a fullscreen game — the window stays put and you get a native toast instead. Audio capture retries automatically when a game holds the device in exclusive mode, so clips never come out silent.
 - **⌨️ Fully Customisable Hotkeys:** Rebind save and arm/disarm from the UI — click, press, done. Persisted in one JSON file.
 - **🎞️ H.264 or HEVC (H.265):** Pick your codec; HEVC cuts storage in half while staying fully hardware-accelerated.
@@ -125,10 +125,8 @@ The binary lands in `target/release/clipflow.exe`; the installers land next to
 it. `cargo packager` reads `[package.metadata.packager]` in `Cargo.toml`, so the
 shipped version can never drift from the crate version.
 
-The deck asks for **Inter** and **JetBrains Mono** by family name but does not
-bundle them (that would add ~500 KB to a 6 MB exe, and the licences differ), so
-it falls back to the platform UI font and its monospace. Install both fonts for
-pixel parity with the screenshots.
+The deck uses **Segoe UI** and **Consolas**, both shipped with Windows, so
+there is nothing to bundle and nothing to download.
 
 Release profile settings (`opt-level = "s"`, `lto`, `panic = "abort"`,
 `strip`) are what keep it a single ~6 MB executable — keep them.

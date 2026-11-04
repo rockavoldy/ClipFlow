@@ -25,6 +25,83 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u32 = 2;
 pub const AAC_BYTES_PER_SECOND: u32 = 24_000; // 192 kbit/s stereo
 
+/// AAC-LC decoder configuration for 48 kHz stereo, as stored in the MP4's
+/// `esds`/`MF_MT_USER_DATA` blob. The MPEG-4 sink writer needs this to
+/// initialise the decoder; without it players decode the raw frames as noise.
+pub fn aac_decoder_config() -> Vec<u8> {
+    // HEAACWAVEINFO header (12 bytes) + AudioSpecificConfig (2 bytes).
+    let mut buf = vec![0u8; 14];
+    // wAudioProfileLevelIndication = 0x29 (AAC-LC L2)
+    buf[2] = 0x29;
+    buf[3] = 0x00;
+    // AudioSpecificConfig: AAC-LC (2), 48 kHz (3), 2 channels (2)
+    // 0001 0001 1001 0000
+    buf[12] = 0x11;
+    buf[13] = 0x90;
+    buf
+}
+
+/// Linear-interpolation stereo resampler (device rate ➜ [`SAMPLE_RATE`]).
+///
+/// Only used when WASAPI refused the explicit 48 kHz request and capture fell
+/// back to the mix format (44.1 kHz USB gear, loopback on strict drivers).
+/// The preferred path is still engine-side conversion; this keeps clips
+/// correct everywhere else. Input and output are both interleaved stereo.
+struct LinearResampler {
+    /// Input frames per output frame.
+    step: f64,
+    /// Fractional input position of the next output frame.
+    pos: f64,
+    prev: [f32; 2],
+    have_prev: bool,
+}
+
+impl LinearResampler {
+    fn new(input_rate: u32) -> Self {
+        Self {
+            step: input_rate.max(1) as f64 / SAMPLE_RATE as f64,
+            pos: 0.0,
+            prev: [0.0, 0.0],
+            have_prev: false,
+        }
+    }
+
+    fn resample(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if input.len() < 2 {
+            return;
+        }
+        let frames = input.len() / 2;
+        // Out-of-range taps hold the edge sample, which keeps the stream
+        // continuous across batch boundaries (`prev` bridges the gap).
+        let at = |i: isize| -> [f32; 2] {
+            if i < 0 {
+                if self.have_prev {
+                    self.prev
+                } else {
+                    [input[0], input[1]]
+                }
+            } else if (i as usize) >= frames {
+                [input[frames * 2 - 2], input[frames * 2 - 1]]
+            } else {
+                [input[i as usize * 2], input[i as usize * 2 + 1]]
+            }
+        };
+        out.reserve((frames as f64 / self.step) as usize * 2 + 4);
+        while self.pos <= frames as f64 - 1.0 {
+            let i0 = self.pos.floor() as isize;
+            let frac = (self.pos - i0 as f64) as f32;
+            let a = at(i0);
+            let b = at(i0 + 1);
+            out.push(a[0] + (b[0] - a[0]) * frac);
+            out.push(a[1] + (b[1] - a[1]) * frac);
+            self.pos += self.step;
+        }
+        self.pos -= frames as f64;
+        self.prev = [input[frames * 2 - 2], input[frames * 2 - 1]];
+        self.have_prev = true;
+    }
+}
+
 pub struct AudioCapture {
     stop: Arc<AtomicBool>,
     handles: Vec<std::thread::JoinHandle<()>>,
@@ -42,6 +119,8 @@ impl AudioCapture {
         ring: Arc<Mutex<RollingRingBuffer>>,
         generation: Arc<AtomicU32>,
         status: Arc<Mutex<Option<String>>>,
+        qpc_origin: i64,
+        qpc_freq: i64,
     ) -> Result<Self, RecorderError> {
         let stop = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();
@@ -56,7 +135,7 @@ impl AudioCapture {
             let h = std::thread::Builder::new()
                 .name("clipflow-audio".into())
                 .spawn(move || {
-                    imp::run(system, mic, gg_c, mg_c, stop_c, ring_c, gen_c, status_c);
+                    imp::run(system, mic, gg_c, mg_c, stop_c, ring_c, gen_c, status_c, qpc_origin, qpc_freq);
                 })
                 .map_err(|e| RecorderError::Other(format!("audio thread: {e}")))?;
             handles.push(h);
@@ -81,12 +160,14 @@ impl AudioCapture {
 mod imp {
     use super::*;
     use windows::Win32::Media::Audio::*;
+    use windows::Win32::Media::KernelStreaming::{
+        SPEAKER_FRONT_LEFT, SPEAKER_FRONT_RIGHT, WAVE_FORMAT_EXTENSIBLE,
+    };
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
         COINIT_MULTITHREADED,
     };
-    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
     const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
         windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
@@ -98,51 +179,184 @@ mod imp {
         _rate: u32,
         float: bool,
         bits: u32,
+        /// Software resampler to 48 kHz, used only when the engine refused
+        /// the explicit 48 kHz request and capture fell back to the mix
+        /// format. `None` on the preferred path (the engine converts).
+        resampler: Option<LinearResampler>,
+    }
+
+    /// The 48 kHz stereo float format the AAC encoder expects. Requested
+    /// first so the engine converts; several drivers (loopback in
+    /// particular) reject anything but the mix format, which is what the
+    /// fallback in [`open_device`] is for.
+    unsafe fn requested_format() -> WAVEFORMATEXTENSIBLE {
+        let mut requested = WAVEFORMATEXTENSIBLE::default();
+        requested.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE as u16;
+        requested.Format.nChannels = CHANNELS as u16;
+        requested.Format.nSamplesPerSec = SAMPLE_RATE;
+        requested.Format.wBitsPerSample = 32;
+        requested.Format.nBlockAlign = (CHANNELS * 4) as u16;
+        requested.Format.nAvgBytesPerSec = SAMPLE_RATE * CHANNELS * 4;
+        requested.Format.cbSize = (std::mem::size_of::<WAVEFORMATEXTENSIBLE>()
+            - std::mem::size_of::<WAVEFORMATEX>()) as u16;
+        requested.Samples.wValidBitsPerSample = 32;
+        requested.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+        requested.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        requested
+    }
+
+    unsafe fn start_endpoint(
+        client: &IAudioClient,
+    ) -> windows::core::Result<IAudioCaptureClient> {
+        let capture: IAudioCaptureClient = client.GetService()?;
+        client.Start()?;
+        Ok(capture)
     }
 
     unsafe fn open_endpoint(loopback: bool) -> windows::core::Result<Endpoint> {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-        let device = enumerator.GetDefaultAudioEndpoint(
-            if loopback { eRender } else { eCapture },
-            eConsole,
-        )?;
-        let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
-        let mix = client.GetMixFormat()?;
-        let wf = &*mix;
+        let flow = if loopback { eRender } else { eCapture };
 
-        let mut flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
-        if loopback {
-            // Loopback streams cannot be event driven on all drivers; poll them.
-            flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
-        }
-
-        client.Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            flags,
-            20_0000, // 20 ms buffer in 100 ns units
-            0,
-            mix,
-            None,
-        )?;
-
-        let capture: IAudioCaptureClient = client.GetService()?;
-        let channels = wf.nChannels as u32;
-        let rate = wf.nSamplesPerSec;
-        let bits = wf.wBitsPerSample as u32;
-
-        // Determine sample encoding (mix format is virtually always 32-bit float).
-        let float = if wf.wFormatTag == 0xFFFE {
-            let ext = mix as *const WAVEFORMATEXTENSIBLE;
-            let subformat = unsafe { std::ptr::addr_of!((*ext).SubFormat).read_unaligned() };
-            subformat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
-        } else {
-            wf.wFormatTag == 3
+        // Prefer the default device, but fall back to any active endpoint. A
+        // disabled or unplugged default device otherwise makes capture
+        // impossible even when another device is present.
+        let mut last_error = match enumerator.GetDefaultAudioEndpoint(flow, eConsole) {
+            Ok(device) => match open_device(&device, loopback) {
+                Ok(endpoint) => return Ok(endpoint),
+                Err(e) => e,
+            },
+            Err(e) => e,
         };
 
-        client.Start()?;
+        if let Ok(devices) = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) {
+            let count = devices.GetCount().unwrap_or(0);
+            for index in 0..count {
+                let Ok(device) = devices.Item(index) else {
+                    continue;
+                };
+                match open_device(&device, loopback) {
+                    Ok(endpoint) => return Ok(endpoint),
+                    Err(e) => last_error = e,
+                }
+            }
+        }
+
+        Err(last_error)
+    }
+
+    unsafe fn open_device(
+        device: &IMMDevice,
+        loopback: bool,
+    ) -> windows::core::Result<Endpoint> {
+        // Capture polls `GetNextPacketSize`; it is not event-driven. Requesting
+        // EVENTCALLBACK without calling `SetEventHandle` makes `Start` fail with
+        // AUDCLNT_E_EVENTHANDLE_NOT_SET on strict drivers, so the mic endpoint
+        // must not ask for it.
+        let flags = if loopback {
+            // Loopback streams cannot be event driven on all drivers; poll them.
+            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        } else {
+            // Microphone: ask the engine to resample/convert into 48 kHz float
+            // (SRC_DEFAULT_QUALITY) so we never depend on the device mix format.
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+        };
+
+        // 100 ms of engine buffering: this thread polls *and* runs the AAC
+        // MFT, so a slow encode burst must not overrun capture. A 20 ms
+        // buffer dropped packets audibly as gaps and crackle.
+        const BUFFER_HNS: i64 = 1_000_000;
+
+        // Loopback capture must use the render endpoint's mix format; drivers
+        // reject any other format on a loopback stream even when `Initialize`
+        // reports success, which is what produced garbage audio before.
+        if loopback {
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let mix = client.GetMixFormat()?;
+            let (channels, rate, float, bits) = {
+                let wf = &*mix;
+                let channels = wf.nChannels as u32;
+                let rate = wf.nSamplesPerSec;
+                let bits = wf.wBitsPerSample as u32;
+                let float = if wf.wFormatTag == 0xFFFE {
+                    let ext = mix as *const WAVEFORMATEXTENSIBLE;
+                    let subformat = std::ptr::addr_of!((*ext).SubFormat).read_unaligned();
+                    subformat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+                } else {
+                    wf.wFormatTag == 3
+                };
+                (channels, rate, float, bits)
+            };
+            client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_HNS, 0, mix, None)?;
+            let capture = start_endpoint(&client)?;
+            CoTaskMemFree(Some(mix as *const std::ffi::c_void));
+
+            let resampler = (rate != SAMPLE_RATE).then(|| LinearResampler::new(rate));
+            return Ok(Endpoint {
+                client,
+                capture,
+                channels,
+                _rate: rate,
+                float,
+                bits,
+                resampler,
+            });
+        }
+
+        // Microphone: prefer an explicit 48 kHz stereo float request so the
+        // engine converts. Pass the full extensible struct (not just its
+        // WAVEFORMATEX header) — the previous code passed a copied header and
+        // the engine read garbage past the end of it.
+        let requested = requested_format();
+        let explicit: windows::core::Result<Endpoint> = (|| {
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                flags,
+                BUFFER_HNS,
+                0,
+                &requested.Format,
+                None,
+            )?;
+            let capture = start_endpoint(&client)?;
+            Ok(Endpoint {
+                client,
+                capture,
+                channels: CHANNELS,
+                _rate: SAMPLE_RATE,
+                float: true,
+                bits: 32,
+                resampler: None,
+            })
+        })();
+        if let Ok(endpoint) = explicit {
+            return Ok(endpoint);
+        }
+
+        // Fallback: the mix format always initialises. The decoded stereo is
+        // then resampled to 48 kHz in software (`resampler`), which is what
+        // keeps 44.1 kHz devices at the right pitch and in A/V sync.
+        let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+        let mix = client.GetMixFormat()?;
+        let (channels, rate, float, bits) = {
+            let wf = &*mix;
+            let channels = wf.nChannels as u32;
+            let rate = wf.nSamplesPerSec;
+            let bits = wf.wBitsPerSample as u32;
+            let float = if wf.wFormatTag == 0xFFFE {
+                let ext = mix as *const WAVEFORMATEXTENSIBLE;
+                let subformat = std::ptr::addr_of!((*ext).SubFormat).read_unaligned();
+                subformat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+            } else {
+                wf.wFormatTag == 3
+            };
+            (channels, rate, float, bits)
+        };
+        client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_HNS, 0, mix, None)?;
+        let capture = start_endpoint(&client)?;
         CoTaskMemFree(Some(mix as *const std::ffi::c_void));
 
+        let resampler = (rate != SAMPLE_RATE).then(|| LinearResampler::new(rate));
         Ok(Endpoint {
             client,
             capture,
@@ -150,17 +364,21 @@ mod imp {
             _rate: rate,
             float,
             bits,
+            resampler,
         })
     }
 
-    unsafe fn drain_endpoint(ep: &Endpoint, out: &mut Vec<f32>, qpc_first: &mut Option<i64>) {
+    unsafe fn drain_endpoint(ep: &mut Endpoint, out: &mut Vec<f32>, qpc_first: &mut Option<i64>) {
+        // Decoded stereo at the *endpoint* rate; resampled to 48 kHz below
+        // when the mix-format fallback is in play.
+        let mut native: Vec<f32> = Vec::new();
         loop {
             let packet = match ep.capture.GetNextPacketSize() {
                 Ok(p) => p,
                 Err(_) => return,
             };
             if packet == 0 {
-                return;
+                break;
             }
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut frames = 0u32;
@@ -178,7 +396,7 @@ mod imp {
                 )
                 .is_err()
             {
-                return;
+                break;
             }
             if qpc_first.is_none() && qpc != 0 {
                 *qpc_first = Some(qpc as i64);
@@ -186,19 +404,26 @@ mod imp {
 
             let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
             let n = frames as usize * ep.channels as usize;
+            // Silent and unknown-encoding packets are stereo zeros: the
+            // downstream mix and the AAC encoder both assume interleaved
+            // stereo (`CHANNELS`), never the endpoint's native layout.
             if silent || data.is_null() {
-                out.extend(std::iter::repeat(0.0).take(frames as usize * CHANNELS as usize));
+                native.extend(std::iter::repeat(0.0).take(frames as usize * CHANNELS as usize));
             } else if ep.float {
                 let src = std::slice::from_raw_parts(data as *const f32, n);
-                downmix(src, ep.channels, out);
+                downmix(src, ep.channels, &mut native);
             } else if ep.bits == 16 {
                 let src = std::slice::from_raw_parts(data as *const i16, n);
                 let tmp: Vec<f32> = src.iter().map(|s| *s as f32 / 32768.0).collect();
-                downmix(&tmp, ep.channels, out);
+                downmix(&tmp, ep.channels, &mut native);
             } else {
-                out.extend(std::iter::repeat(0.0).take(frames as usize * CHANNELS as usize));
+                native.extend(std::iter::repeat(0.0).take(frames as usize * CHANNELS as usize));
             }
             let _ = ep.capture.ReleaseBuffer(frames);
+        }
+        match ep.resampler.as_mut() {
+            Some(rs) => rs.resample(&native, out),
+            None => out.extend_from_slice(&native),
         }
     }
 
@@ -273,7 +498,7 @@ mod imp {
             &self,
             pcm: &[i16],
             pts_hns: i64,
-            mut sink: impl FnMut(Vec<u8>, i64, i64),
+            mut sink: impl FnMut(Vec<u8>),
         ) -> windows::core::Result<()> {
             let bytes = pcm.len() * 2;
             let buffer = MFCreateMemoryBuffer(bytes as u32)?;
@@ -307,23 +532,66 @@ mod imp {
 
                 match self.transform.ProcessOutput(0, &mut out, &mut status) {
                     Ok(()) => {}
-                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
-                    Err(e) => return Err(e),
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                        let _ = std::mem::ManuallyDrop::take(&mut out[0].pSample);
+                        let _ = std::mem::ManuallyDrop::take(&mut out[0].pEvents);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = std::mem::ManuallyDrop::take(&mut out[0].pSample);
+                        let _ = std::mem::ManuallyDrop::take(&mut out[0].pEvents);
+                        return Err(e);
+                    }
                 }
 
-                let t = out_sample.GetSampleTime().unwrap_or(pts_hns);
-                let d = out_sample.GetSampleDuration().unwrap_or(duration);
-                let contiguous = out_sample.ConvertToContiguousBuffer()?;
+                let produced = unsafe { std::mem::ManuallyDrop::take(&mut out[0].pSample) };
+                let produced = produced.expect("produced sample");
+                let contiguous = produced.ConvertToContiguousBuffer()?;
                 let mut p: *mut u8 = std::ptr::null_mut();
                 let mut cur = 0u32;
                 contiguous.Lock(&mut p, None, Some(&mut cur))?;
                 let payload = std::slice::from_raw_parts(p, cur as usize).to_vec();
                 let _ = contiguous.Unlock();
+                let _ = std::mem::ManuallyDrop::take(&mut out[0].pEvents);
+
                 if !payload.is_empty() {
-                    sink(payload, t, d);
+                    // The MFT's output timestamps are unreliable (delayed, duplicated
+                    // or zero), so ignore them and use the caller's monotonic PTS.
+                    sink(payload);
                 }
-                let _ = std::mem::ManuallyDrop::take(&mut out[0].pSample);
             }
+        }
+    }
+
+    /// Turns the common WASAPI failures into something a user can act on. The
+    /// raw HRESULTs are otherwise identical-looking hex strings.
+    fn endpoint_failure(loopback: bool, e: &windows::core::Error) -> String {
+        let device = if loopback {
+            "system audio loopback"
+        } else {
+            "microphone"
+        };
+        match e.code().0 as u32 {
+            0x8007_0005 if loopback => {
+                format!("{device} unavailable: access denied (0x80070005)")
+            }
+            0x8007_0005 => format!(
+                "{device} unavailable: access denied — enable Settings > Privacy & security > Microphone > “Let desktop apps access your microphone”"
+            ),
+            0x8007_0490 => format!("{device} unavailable: no active device found"),
+            0x8889_0004 => {
+                format!("{device} unavailable: the device was disconnected or disabled")
+            }
+            0x8889_0008 => {
+                format!("{device} unavailable: the device does not support the capture format")
+            }
+            0x8889_000A => {
+                format!("{device} unavailable: the device is in exclusive use by another app")
+            }
+            0x8889_0017 => {
+                format!("{device} unavailable: the audio driver rejected the event handle")
+            }
+            _ => format!("{device} unavailable: {e}"),
         }
     }
 
@@ -338,11 +606,7 @@ mod imp {
         match open_endpoint(loopback) {
             Ok(ep) => Ok(Some(ep)),
             Err(e) => {
-                let msg = if loopback {
-                    format!("system audio loopback unavailable: {e}")
-                } else {
-                    format!("microphone unavailable: {e}")
-                };
+                let msg = endpoint_failure(loopback, &e);
                 *status.lock() = Some(msg.clone());
                 log::warn!("[clipflow::audio] {msg}");
                 Err(())
@@ -359,6 +623,8 @@ mod imp {
         ring: Arc<Mutex<RollingRingBuffer>>,
         generation: Arc<AtomicU32>,
         status: Arc<Mutex<Option<String>>>,
+        qpc_origin: i64,
+        qpc_freq: i64,
     ) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -380,10 +646,8 @@ mod imp {
             let mut encoder: Option<AacEncoder> = None;
             let mut last_attempt = std::time::Instant::now();
 
-            let mut freq = 0i64;
-            let _ = QueryPerformanceFrequency(&mut freq);
-            let mut origin = 0i64;
-            let _ = QueryPerformanceCounter(&mut origin);
+            let freq = qpc_freq;
+            let origin = qpc_origin;
             let freq = if freq == 0 { HNS_PER_SECOND } else { freq };
 
             // AAC-LC frames are 1024 samples; feed the MFT in exact multiples.
@@ -435,11 +699,11 @@ mod imp {
                 }
 
                 let loopback_before = pending.len();
-                if let Some(ep) = loopback.as_ref() {
+                if let Some(ep) = loopback.as_mut() {
                     drain_endpoint(ep, &mut pending, &mut qpc_first);
                 }
                 let mic_before = mic_pending.len();
-                if let Some(ep) = microphone.as_ref() {
+                if let Some(ep) = microphone.as_mut() {
                     drain_endpoint(ep, &mut mic_pending, &mut qpc_first);
                 }
 
@@ -450,12 +714,14 @@ mod imp {
                 // output is byte-identical to the original fixed mix.
                 let gg = game_gain.load(Ordering::Acquire) as f32 * 0.001;
                 let mg = mic_gain.load(Ordering::Acquire) as f32 * 0.001;
-                if gg != 1.0 && pending.len() > loopback_before {
+                let loopback_new = pending.len() - loopback_before;
+                let mic_new = mic_pending.len() - mic_before;
+                if gg != 1.0 && loopback_new > 0 {
                     for s in pending.iter_mut().skip(loopback_before) {
                         *s = (*s * gg).clamp(-1.0, 1.0);
                     }
                 }
-                if mg != 1.0 && mic_pending.len() > mic_before {
+                if mg != 1.0 && mic_new > 0 {
                     for s in mic_pending.iter_mut().skip(mic_before) {
                         *s = (*s * mg).clamp(-1.0, 1.0);
                     }
@@ -463,22 +729,22 @@ mod imp {
 
                 // Mix the mic in, sample-aligned, -3 dB per source — the same
                 // pad as the original fixed mix; user volumes already rode on
-                // top of the samples above.
-                if !mic_pending.is_empty() {
-                    if loopback.is_none() {
-                        pending.append(&mut mic_pending);
-                    } else {
-                        let n = pending.len().min(mic_pending.len());
-                        for i in 0..n {
-                            pending[i] = (pending[i] * 0.707 + mic_pending[i] * 0.707)
-                                .clamp(-1.0, 1.0);
-                        }
-                        mic_pending.drain(..n);
-                        if mic_pending.len() > FRAME_SAMPLES * 16 {
-                            mic_pending.clear(); // mic ran away: resync
-                        }
+                // top of the samples above. Only newly captured samples are
+                // touched, so a mic packet can never be mixed twice into the
+                // same loopback history.
+                let overlap = loopback_new.min(mic_new);
+                for i in 0..overlap {
+                    let lb = pending[loopback_before + i] * 0.707;
+                    let mc = mic_pending[mic_before + i] * 0.707;
+                    pending[loopback_before + i] = (lb + mc).clamp(-1.0, 1.0);
+                }
+                if mic_new > overlap {
+                    let tail = &mic_pending[mic_before + overlap..];
+                    for s in tail {
+                        pending.push(*s * 0.707);
                     }
                 }
+                mic_pending.clear();
 
                 let Some(enc) = encoder.as_ref() else {
                     // Encoder not ready: cap the pending queue so a stalled AAC
@@ -506,12 +772,12 @@ mod imp {
 
                     let gen = generation.load(Ordering::Acquire);
                     let ring_ref = &ring;
-                    let _ = enc.encode(&pcm, pts, |payload, t, d| {
+                    let _ = enc.encode(&pcm, pts, |payload| {
                         ring_ref.lock().push(EncodedPacket {
                             track: TrackKind::Audio,
                             data: Arc::from(payload.into_boxed_slice()),
-                            pts_hns: t,
-                            duration_hns: d,
+                            pts_hns: pts,
+                            duration_hns: (1024 * HNS_PER_SECOND / SAMPLE_RATE as i64),
                             keyframe: true,
                             generation: gen,
                         });
@@ -550,6 +816,8 @@ mod imp {
         ring: Arc<Mutex<RollingRingBuffer>>,
         generation: Arc<AtomicU32>,
         _status: Arc<Mutex<Option<String>>>,
+        _qpc_origin: i64,
+        _qpc_freq: i64,
     ) {
         // 21.3 ms AAC frames of silence keep the muxer path exercised.
         let frame_hns = 1024 * HNS_PER_SECOND / SAMPLE_RATE as i64;
@@ -566,5 +834,78 @@ mod imp {
             pts += frame_hns;
             std::thread::sleep(std::time::Duration::from_millis(21));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine_stereo(frames: usize, rate: u32, freq: f32) -> Vec<f32> {
+        let mut v = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let s = (i as f32 * freq * std::f32::consts::TAU / rate as f32).sin();
+            v.push(s);
+            v.push(s);
+        }
+        v
+    }
+
+    #[test]
+    fn same_rate_resampling_is_transparent() {
+        let input = sine_stereo(4096, SAMPLE_RATE, 440.0);
+        let mut rs = LinearResampler::new(SAMPLE_RATE);
+        let mut out = Vec::new();
+        rs.resample(&input, &mut out);
+        assert_eq!(out.len(), input.len());
+        for (a, b) in out.iter().zip(input.iter()) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn forty_four_one_to_forty_eight_k_produces_the_right_frame_count() {
+        // One second at 44.1 kHz ➜ ~48 k frames,-L/R interleaved, finite.
+        let input = sine_stereo(44_100, 44_100, 440.0);
+        let mut rs = LinearResampler::new(44_100);
+        let mut out = Vec::new();
+        rs.resample(&input, &mut out);
+        let frames = out.len() / 2;
+        assert!(
+            (47_900..=48_100).contains(&frames),
+            "expected ~48000 frames, got {frames}"
+        );
+        assert!(out.iter().all(|s| s.is_finite()));
+        assert!(out.iter().all(|s| *s >= -1.0 && *s <= 1.0));
+    }
+
+    #[test]
+    fn split_batches_stay_continuous() {
+        // Draining in two polls must not click at the seam: the resampler
+        // bridges batches through its `prev` frame.
+        let input = sine_stereo(4096, 44_100, 440.0);
+        let mut whole = Vec::new();
+        LinearResampler::new(44_100).resample(&input, &mut whole);
+        let mut split = Vec::new();
+        let mut rs = LinearResampler::new(44_100);
+        rs.resample(&input[..input.len() / 2], &mut split);
+        let seam = split.len();
+        rs.resample(&input[input.len() / 2..], &mut split);
+        assert!((whole.len() as isize - split.len() as isize).abs() <= 4);
+        // No discontinuity where the second batch starts. The two samples
+        // straddle ~1 output step, so normal 440 Hz slope accounts for up to
+        // ~0.06; anything near 1.0 would be an audible click.
+        let l = split[seam - 2];
+        let r = split[seam];
+        assert!((r - l).abs() < 0.15, "click at seam: {l} -> {r}");
+    }
+
+    #[test]
+    fn empty_and_tiny_inputs_are_safe() {
+        let mut rs = LinearResampler::new(44_100);
+        let mut out = vec![9.0];
+        rs.resample(&[], &mut out);
+        rs.resample(&[0.5], &mut out);
+        assert_eq!(out, vec![9.0]);
     }
 }

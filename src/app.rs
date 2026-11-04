@@ -90,17 +90,22 @@ pub fn run() {
         // Window
         // ------------------------------------------------------------------
         let options = WindowOptions {
-            // 1100×780 with a 900×620 floor: the deck is a single scrolling
-            // column, so it needs less width than the old three-tab layout.
+            // Native Win32 decorations: the OS draws the titlebar, close /
+            // minimize / maximize and the window menu, so there is no custom
+            // chrome to keep in sync with the platform.
+            titlebar: Some(TitlebarOptions {
+                title: Some("ClipFlow".into()),
+                ..Default::default()
+            }),
+            // The deck is a compact single column now that the clip library is
+            // gone; settings scrolls within this same window.
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
-                size(px(1100.0), px(780.0)),
+                size(px(760.0), px(400.0)),
                 cx,
             ))),
-            window_min_size: Some(size(px(900.0), px(620.0))),
-            // Frameless: the deck draws its own titlebar, including the
-            // close-hides-to-tray behaviour.
-            ..gpui_kit::component::TitleBar::window_options()
+            window_min_size: Some(size(px(640.0), px(320.0))),
+            ..Default::default()
         };
 
         let (window_handle, deck) = match gpui_kit::open_window(options, cx, |window, cx| {
@@ -122,10 +127,15 @@ pub fn run() {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(120))
                     .await;
-                weak.update(cx, |deck, _cx| {
-                    crate::platform::win32::set_topmost(deck.hwnd, true);
-                })
-                .ok();
+                weak.update(cx, |deck, _cx| deck.hwnd)
+                    .map(|hwnd| {
+                        cx.update(|cx| {
+                            crate::platform::win32::defer(cx, move || {
+                                crate::platform::win32::set_topmost(hwnd, true)
+                            })
+                        });
+                    })
+                    .ok();
             })
             .detach();
         }
@@ -137,7 +147,7 @@ pub fn run() {
         window_handle
             .update(cx, |_, window, cx| {
                 let state = Arc::clone(&settings_for_close);
-                window.on_window_should_close(cx, move |window, _cx| {
+                window.on_window_should_close(cx, move |window, cx| {
                     if state.settings_snapshot().minimize_to_tray {
                         // Returning `false` vetoes the close; the window is
                         // hidden instead and the engine keeps running.
@@ -146,7 +156,13 @@ pub fn run() {
                             if let raw_window_handle::RawWindowHandle::Win32(win32) =
                                 handle.as_raw()
                             {
-                                crate::platform::win32::set_visible(win32.hwnd.get(), false);
+                                // `ShowWindow` dispatches messages, so it must
+                                // not run while the App is borrowed inside this
+                                // close handler.
+                                let hwnd = win32.hwnd.get();
+                                crate::platform::win32::defer(cx, move || {
+                                    crate::platform::win32::set_visible(hwnd, false)
+                                });
                             }
                         }
                         false
@@ -166,7 +182,6 @@ pub fn run() {
         crate::runtime::eco::start(weak.clone(), Arc::clone(&state_for_ui), cx);
         crate::runtime::tray::spawn_hotkeys(weak.clone(), Arc::clone(&hotkeys), cx);
         crate::runtime::tray::spawn_tray(weak.clone(), tray_actions, cx);
-        spawn_toast_expiry(weak.clone(), cx);
 
         // Park the icon (when one was created) in the global so it is not
         // dropped: dropping `TrayIcon` removes it from the notification area.
@@ -187,25 +202,6 @@ pub fn run() {
         // ------------------------------------------------------------------
         launch_tasks(Arc::clone(&state_for_ui), deck.downgrade(), cx);
     });
-}
-
-/// Clears the in-app toast stack once a second.
-///
-/// A single task is cheaper and simpler than a timer per toast, and the stack is
-/// capped at three, so "all clear after a second" is indistinguishable from real
-/// per-toast expiry.
-fn spawn_toast_expiry(deck: WeakEntity<Deck>, cx: &mut App) {
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(1))
-                .await;
-            if deck.update(cx, |deck, cx| deck.tick(cx)).is_err() {
-                return;
-            }
-        }
-    })
-    .detach();
 }
 
 /// Arm the buffer at launch and prune old clips, both off the UI thread.

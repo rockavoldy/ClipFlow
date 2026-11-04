@@ -218,7 +218,7 @@ impl Deck {
         let primary = if armed {
             Button::new("disarm")
                 .secondary()
-                .label("DISARM")
+                .label("Disarm")
                 .tooltip("Stop recording the rolling buffer")
                 .on_click(cx.listener(|deck, _ev, _window, cx| {
                     deck.handle_intent(Intent::Disarm, cx);
@@ -226,7 +226,7 @@ impl Deck {
         } else {
             Button::new("arm")
                 .primary()
-                .label("ARM")
+                .label("Arm")
                 .tooltip("Start recording the rolling buffer")
                 .on_click(cx.listener(|deck, _ev, _window, cx| {
                     deck.handle_intent(Intent::Arm, cx);
@@ -234,20 +234,19 @@ impl Deck {
         };
 
         let mut save = Button::new("save")
-            .label("SAVE")
+            .primary()
+            .label("Save")
             .tooltip(save_tooltip)
             .on_click(cx.listener(|deck, _ev, _window, cx| {
                 deck.handle_intent(Intent::SaveReplay, cx);
             }));
         if block.is_some() {
             save = save.disabled(true);
-        } else {
-            save = save.danger();
         }
 
         let mut last30 = Button::new("save-30")
             .secondary()
-            .label("LAST 30 s")
+            .label("Last 30 s")
             .tooltip("Save only the most recent 30 seconds")
             .on_click(cx.listener(|deck, _ev, _window, cx| {
                 deck.handle_intent(Intent::SaveLast30, cx);
@@ -263,8 +262,8 @@ impl Deck {
             .flex_col()
             .gap_3()
             .p_4()
-            .rounded_lg()
-            .bg(palette.panel)
+            .rounded_md()
+            .bg(palette.surface)
             .border_1()
             .border_color(palette.line)
             .child(
@@ -275,10 +274,10 @@ impl Deck {
                     .justify_between()
                     .child(
                         div()
-                            .font_family(crate::ui::theme::MONO)
-                            .text_xs()
-                            .text_color(palette.cyan)
-                            .child("CAPTURE"),
+                            .text_sm()
+                            .font_weight(crate::ui::theme::label_weight())
+                            .text_color(palette.text)
+                            .child("Capture"),
                     )
                     .child(
                         div()
@@ -287,18 +286,13 @@ impl Deck {
                             .items_center()
                             .gap_3()
                             // Privacy badge: the deck is deliberately not
-                            // recording desktop content right now. Same
-                            // "PRIV" chip the old HUD showed.
+                            // recording desktop content right now.
                             .children(self.stats.privacy_active.then(|| {
                                 div()
-                                    .px_2()
-                                    .rounded_sm()
-                                    .bg(palette.panel_2)
                                     .font_family(crate::ui::theme::MONO)
                                     .text_xs()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .text_color(palette.amber)
-                                    .child("🔒 PRIV")
+                                    .text_color(palette.warn)
+                                    .child("Privacy paused")
                             }))
                             .child(
                                 div()
@@ -319,7 +313,7 @@ impl Deck {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .h(px(38.0))
+                    .h(px(34.0))
                     .child(primary)
                     .child(save)
                     .child(last30),
@@ -330,7 +324,7 @@ impl Deck {
                 div()
                     .font_family(crate::ui::theme::MONO)
                     .text_xs()
-                    .text_color(palette.amber)
+                    .text_color(palette.warn)
                     .child(b.reason())
             }))
             .child(
@@ -338,16 +332,17 @@ impl Deck {
                     .flex()
                     .flex_row()
                     .flex_wrap()
-                    .gap_x(px(6.0))
-                    .gap_y(px(2.0))
+                    .gap_x(px(24.0))
+                    .gap_y(px(6.0))
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(palette.line)
                     .children(rows.into_iter().map(|row| {
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap_2()
-                            .px_2()
-                            .py_1()
                             .child(
                                 div()
                                     .font_family(crate::ui::theme::MONO)
@@ -360,7 +355,7 @@ impl Deck {
                                     .font_family(crate::ui::theme::MONO)
                                     .text_xs()
                                     .text_color(if row.warn {
-                                        palette.amber
+                                        palette.warn
                                     } else {
                                         palette.text
                                     })

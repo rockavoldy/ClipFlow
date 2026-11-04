@@ -1,61 +1,56 @@
-//! Visual language: the same palette as `src/index.css`, expressed as Rust.
+//! Neutral, near-monochrome visual language.
 //!
-//! The old deck was Tailwind with `@theme` tokens; this is the direct port of
-//! those tokens. Values are copied verbatim so the GPUI build reads as the same
-//! product, not a redesign:
+//! The deck is a plain Windows utility: white content, light-gray chrome,
+//! one-pixel borders and dark-gray text. There is no brand colour and no
+//! accent tint — active controls are near-black, inactive ones are gray.
+//! Hue is reserved for things a user has to notice: the armed indicator and
+//! errors (`ok` / `warn` / `danger`), and even those are the restrained
+//! Windows system shades rather than neon.
 //!
-//! | token   | hex       |
-//! |---------|-----------|
-//! | void    | `#05060d` |
-//! | deck    | `#0a0d1a` |
-//! | panel   | `#0e1224` |
-//! | panel2  | `#131832` |
-//! | line    | `#1e2545` |
-//! | cyan    | `#5eeaff` |
-//! | magenta | `#ff4fd8` |
-//! | lime    | `#76ff9c` |
-//! | amber   | `#ffc94f` |
-//! | danger  | `#ff5f6d` |
-//!
-//! Font note: the web build loaded Inter and JetBrains Mono from the network.
-//! Neither is bundled (that would add ~500 KB to a ~6 MB exe and the licences
-//! differ), so the deck asks for them by family name and falls back to the
-//! platform UI font and its monospace. On a machine with those fonts installed
-//! it is pixel-identical; otherwise it degrades to Segoe UI / Consolas.
+//! Fonts are the ones every Windows install already has: Segoe UI and
+//! Consolas. Nothing is bundled and nothing is downloaded.
 
-use gpui_kit::component::{ActiveTheme, Theme};
+use gpui_kit::component::Theme;
 use gpui_kit::{App, FontWeight, Hsla, px, rgb};
 
-pub const VOID: u32 = 0x05060d;
-pub const DECK: u32 = 0x0a0d1a;
-pub const PANEL: u32 = 0x0e1224;
-pub const PANEL_2: u32 = 0x131832;
-pub const LINE: u32 = 0x1e2545;
-pub const TEXT: u32 = 0xe6ecff;
-pub const MUTED: u32 = 0x8a93b8;
-pub const CYAN: u32 = 0x5eeaff;
-pub const MAGENTA: u32 = 0xff4fd8;
-pub const LIME: u32 = 0x76ff9c;
-pub const AMBER: u32 = 0xffc94f;
-pub const DANGER: u32 = 0xff5f6d;
+pub const BACKGROUND: u32 = 0xffffff;
+pub const CHROME: u32 = 0xf3f3f3;
+pub const SURFACE: u32 = 0xffffff;
+pub const SUBTLE: u32 = 0xf2f2f2;
+pub const SELECTED: u32 = 0xe5e5e5;
+pub const LINE: u32 = 0xdedede;
+pub const TEXT: u32 = 0x1a1a1a;
+pub const MUTED: u32 = 0x666666;
+pub const DISABLED: u32 = 0xa0a0a0;
+pub const ACCENT: u32 = 0x202020;
+pub const OK: u32 = 0x107c10;
+pub const WARN: u32 = 0x8a5a00;
+pub const DANGER: u32 = 0xc42b1c;
 
-pub const SANS: &str = "Inter";
-pub const MONO: &str = "JetBrains Mono";
+pub const SANS: &str = "Segoe UI";
+pub const MONO: &str = "Consolas";
 
 /// Semantic colors resolved once per frame so the render path does no hex math.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
-    pub void: Hsla,
-    pub deck: Hsla,
-    pub panel: Hsla,
-    pub panel_2: Hsla,
+    /// Main window / content background.
+    pub background: Hsla,
+    /// Titlebar and footer.
+    pub chrome: Hsla,
+    /// Cards and panels.
+    pub surface: Hsla,
+    /// Hover fills and inactive chips.
+    pub subtle: Hsla,
+    /// Selected rows and active chips.
+    pub selected: Hsla,
     pub line: Hsla,
     pub text: Hsla,
     pub muted: Hsla,
-    pub cyan: Hsla,
-    pub magenta: Hsla,
-    pub lime: Hsla,
-    pub amber: Hsla,
+    pub disabled: Hsla,
+    /// Near-black emphasis for filled buttons and active labels.
+    pub accent: Hsla,
+    pub ok: Hsla,
+    pub warn: Hsla,
     pub danger: Hsla,
 }
 
@@ -68,37 +63,38 @@ fn hsl(hex: u32) -> Hsla {
 impl Palette {
     pub fn new() -> Self {
         Self {
-            void: hsl(VOID),
-            deck: hsl(DECK),
-            panel: hsl(PANEL),
-            panel_2: hsl(PANEL_2),
+            background: hsl(BACKGROUND),
+            chrome: hsl(CHROME),
+            surface: hsl(SURFACE),
+            subtle: hsl(SUBTLE),
+            selected: hsl(SELECTED),
             line: hsl(LINE),
             text: hsl(TEXT),
             muted: hsl(MUTED),
-            cyan: hsl(CYAN),
-            magenta: hsl(MAGENTA),
-            lime: hsl(LIME),
-            amber: hsl(AMBER),
+            disabled: hsl(DISABLED),
+            accent: hsl(ACCENT),
+            ok: hsl(OK),
+            warn: hsl(WARN),
             danger: hsl(DANGER),
         }
     }
 
-    /// Color for a `ToastTone`, matching `TONE_STYLES` from `App.tsx`.
+    /// Color for a status tone: only a failure or a warning gets hue.
     pub fn tone(&self, tone: Tone) -> Hsla {
         match tone {
-            Tone::Ok => self.lime,
-            Tone::Warn => self.amber,
+            Tone::Ok => self.ok,
+            Tone::Warn => self.warn,
             Tone::Err => self.danger,
-            Tone::Info => self.cyan,
+            Tone::Info => self.text,
         }
     }
 
     /// Color for an engine state, used by the armed pill and the status line.
     pub fn state(&self, state: ArmedState) -> Hsla {
         match state {
-            ArmedState::Armed => self.lime,
-            ArmedState::Starting => self.amber,
-            ArmedState::Busy => self.cyan,
+            ArmedState::Armed => self.ok,
+            ArmedState::Starting => self.warn,
+            ArmedState::Busy => self.text,
             ArmedState::Idle => self.muted,
             ArmedState::Error => self.danger,
         }
@@ -111,8 +107,8 @@ impl Default for Palette {
     }
 }
 
-/// The four toast tones from `App.tsx`. Kept because the copy/tone pairing is a
-/// user-visible contract ("saved" is green, "privacy blocked" is red).
+/// Status tones for the one-line status strip. Kept because the copy/tone pairing is a user-visible contract
+/// ("saved" is positive, "privacy blocked" is an error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Ok,
@@ -132,57 +128,113 @@ pub enum ArmedState {
     Error,
 }
 
-/// Applies the palette to gpui-component's theme so any stock widget (buttons,
-/// inputs, menus) inherits the deck's colors instead of the library default
-/// light/blue look.
+/// Applies the neutral palette to gpui-component's theme so any stock widget
+/// (buttons, inputs, menus) inherits the same restrained look.
+///
+/// The light mode is forced: the deck is a light-only design, and loading the
+/// system's dark palette first would leave half the stock widgets dark.
 pub fn init(cx: &mut App) {
+    // `change` loads a registered theme and replaces the colors, so the edits
+    // must happen in a second pass.
+    Theme::change(gpui_kit::component::ThemeMode::Light, None, cx);
+
     Theme::update(cx, |theme| {
         theme.font_family = SANS.into();
         theme.mono_font_family = MONO.into();
         theme.font_size = px(13.0);
         theme.mono_font_size = px(12.0);
-        theme.radius = px(6.0);
-        theme.radius_lg = px(10.0);
+        theme.radius = px(4.0);
+        theme.radius_lg = px(6.0);
+        theme.shadow = false;
 
         let p = Palette::new();
-        theme.background = p.deck;
+        theme.background = p.background;
         theme.foreground = p.text;
         theme.border = p.line;
+        theme.muted = p.subtle;
         theme.muted_foreground = p.muted;
-        theme.primary = p.cyan;
-        theme.primary_foreground = p.void;
-        theme.secondary = p.panel_2;
+        theme.primary = p.accent;
+        theme.primary_foreground = p.background;
+        theme.primary_hover = hsl(0x333333);
+        theme.primary_active = hsl(0x000000);
+        theme.secondary = p.subtle;
+        theme.secondary_foreground = p.text;
+        theme.secondary_hover = hsl(0xe8e8e8);
+        theme.secondary_active = p.selected;
+        theme.accent = p.subtle;
+        theme.accent_foreground = p.text;
         theme.danger = p.danger;
-        theme.success = p.lime;
-        theme.warning = p.amber;
-        theme.info = p.cyan;
+        theme.danger_foreground = p.background;
+        theme.danger_hover = hsl(0xa82316);
+        theme.success = p.ok;
+        theme.success_foreground = p.background;
+        theme.warning = p.warn;
+        theme.warning_foreground = p.background;
+        theme.info = p.text;
+        theme.info_foreground = p.background;
+        theme.ring = p.muted;
+        theme.selection = p.selected;
+        theme.caret = p.text;
+        theme.input = p.background;
+        theme.link = p.text;
+        theme.link_hover = p.muted;
+        theme.link_active = p.text;
+        theme.title_bar = p.chrome;
+        theme.title_bar_border = p.line;
+        theme.status_bar = p.chrome;
+        theme.status_bar_border = p.line;
+        theme.list_hover = p.subtle;
+        theme.list_active = p.selected;
+        theme.list_active_border = p.line;
+        theme.popover = p.background;
+        theme.popover_foreground = p.text;
+        theme.group_box = p.chrome;
+        theme.group_box_foreground = p.text;
+        theme.skeleton = p.subtle;
+        theme.slider_bar = p.accent;
+        theme.slider_thumb = p.background;
+        theme.progress_bar = p.accent;
+        theme.switch = hsl(0xc8c8c8);
+        theme.switch_thumb = p.background;
+        theme.scrollbar_thumb = hsl(0xc0c0c0);
+        theme.scrollbar_thumb_hover = hsl(0xa0a0a0);
+        theme.window_border = p.line;
+        theme.tab_bar = p.chrome;
+        theme.tab = p.background;
+        theme.tab_active = p.surface;
+        theme.tab_active_foreground = p.text;
+        theme.tab_foreground = p.muted;
+
+        // Stock buttons read the component tokens, not the semantic colors, so
+        // they are set explicitly rather than relying on a fallback.
+        theme.button = p.subtle;
+        theme.button_hover = hsl(0xe8e8e8);
+        theme.button_active = p.selected;
+        theme.button_foreground = p.text;
+        theme.button_primary = p.accent;
+        theme.button_primary_hover = hsl(0x333333);
+        theme.button_primary_active = hsl(0x000000);
+        theme.button_primary_foreground = p.background;
+        theme.button_secondary = p.subtle;
+        theme.button_secondary_hover = hsl(0xe8e8e8);
+        theme.button_secondary_active = p.selected;
+        theme.button_secondary_foreground = p.text;
+        theme.button_danger = p.danger;
+        theme.button_danger_hover = hsl(0xa82316);
+        theme.button_danger_active = hsl(0x8f1d12);
+        theme.button_danger_foreground = p.background;
     });
 }
 
-/// Uppercase, wide-tracked label style used throughout the old deck
-/// (`tracking-[0.18em] text-[10px] uppercase`). Returned as helpers because
-/// gpui has no letter-spacing, so we lean on caps + weight instead.
+/// Weight used for the short uppercase section labels.
 pub fn label_weight() -> FontWeight {
     FontWeight::SEMIBOLD
 }
 
-pub fn mono() -> &'static str {
-    MONO
-}
-
-/// Reads the active palette from the app theme's global, so views never build
-/// colors inline.
-pub fn palette(cx: &App) -> Palette {
-    // The palette is fixed (dark-only) and cheap to rebuild; keeping it out of
-    // a global avoids a second source of truth next to gpui-component's Theme.
-    let _ = cx.theme();
+/// Reads the active palette. It is fixed and cheap to rebuild; keeping it out
+/// of a global avoids a second source of truth next to gpui-component's Theme.
+pub fn palette(_cx: &App) -> Palette {
     Palette::new()
-}
-
-/// Color for an armed/idle pill. Free function so render helpers can tint
-/// without threading the whole palette.
-pub fn state_color(armed: bool) -> Hsla {
-    if armed { hsl(LIME) } else { hsl(MUTED) }
 }
 
 #[cfg(test)]
@@ -209,25 +261,30 @@ mod tests {
     }
 
     #[test]
-    fn palette_values_match_the_web_theme_tokens() {
-        // These hex values are copied from `src/index.css` `@theme`; if someone
-        // "tidies" them the deck stops matching the shipped screenshots.
+    fn palette_is_neutral_apart_from_status_colors() {
         let p = Palette::new();
-        assert_eq!(channels(p.void), expected(VOID));
-        assert_eq!(channels(p.deck), expected(DECK));
-        assert_eq!(channels(p.cyan), expected(CYAN));
-        assert_eq!(channels(p.lime), expected(LIME));
+        assert_eq!(channels(p.background), expected(BACKGROUND));
+        assert_eq!(channels(p.chrome), expected(CHROME));
+        assert_eq!(channels(p.line), expected(LINE));
+        assert_eq!(channels(p.text), expected(TEXT));
+        assert_eq!(channels(p.accent), expected(ACCENT));
+        assert_eq!(channels(p.ok), expected(OK));
+        assert_eq!(channels(p.warn), expected(WARN));
         assert_eq!(channels(p.danger), expected(DANGER));
-        assert_eq!(channels(p.magenta), expected(MAGENTA));
-        assert_eq!(channels(p.amber), expected(AMBER));
     }
 
     #[test]
-    fn tone_colors_pair_with_the_old_tailwind_styles() {
+    fn only_failures_and_warnings_are_colored() {
         let p = Palette::new();
-        assert_eq!(p.tone(Tone::Ok), p.lime);
+        assert_eq!(p.tone(Tone::Ok), p.ok);
         assert_eq!(p.tone(Tone::Err), p.danger);
-        assert_eq!(p.tone(Tone::Warn), p.amber);
-        assert_eq!(p.tone(Tone::Info), p.cyan);
+        assert_eq!(p.tone(Tone::Warn), p.warn);
+        assert_eq!(p.tone(Tone::Info), p.text);
+    }
+
+    #[test]
+    fn the_theme_uses_standard_windows_fonts() {
+        assert_eq!(SANS, "Segoe UI");
+        assert_eq!(MONO, "Consolas");
     }
 }
