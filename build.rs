@@ -41,6 +41,16 @@ fn main() {
             std::fs::write(&manifest_path, manifest).expect("write application manifest");
             // `/MANIFESTINPUT` is merged into the default manifest rather than
             // replacing it, so the linker's UAC settings survive.
+            //
+            // `/MANIFEST:EMBED` is not optional here: the MSVC linker refuses
+            // to take an input manifest unless it is also told to embed the
+            // result, and fails the link with
+            //   LNK1220: 'MANIFESTINPUT' requires '/MANIFEST:EMBED' specification
+            // rustc passes no `/MANIFEST*` flag of its own on the MSVC target,
+            // so nothing else supplies it. The flag was lost when the Tauri
+            // build script was replaced by this one - tauri's build.rs emitted
+            // both.
+            println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
             println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest_path.display());
         }
 
