@@ -1,6 +1,6 @@
 //! 4 Hz telemetry.
 //!
-//! The old build emitted `clipflow://stats` every 250 ms and `App.tsx` stored
+//! The old build emitted `yascreenclipper://stats` every 250 ms and `App.tsx` stored
 //! the payload. Here the loop writes the same snapshot into the deck's state
 //! and calls `cx.notify()`.
 //!

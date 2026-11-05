@@ -38,7 +38,7 @@ impl PrivacyGateHysteresis {
     ///
     /// * `privacy_enabled` — the Privacy mode setting.
     /// * `desired_gate` — what the current foreground implies: `true` pauses
-    ///   (desktop / ClipFlow focused), `false` records (game focused).
+    ///   (desktop / YAScreenClipper focused), `false` records (game focused).
     /// * `now_ms` — monotonic clock in milliseconds.
     ///
     /// Returns the gate value to apply to the engine, or `None` when nothing
@@ -85,14 +85,14 @@ impl PrivacyGateHysteresis {
 }
 
 /// Mirrors the Rust `privacy_should_gate()`: pause only when the foreground is
-/// *positively* ClipFlow itself or the desktop (`explorer.exe`). A failed query
+/// *positively* YAScreenClipper itself or the desktop (`explorer.exe`). A failed query
 /// (`None`/empty) means "keep recording" — breaking `Alt+C` for an undetected
 /// game is worse than a rare ambiguous frame.
 pub fn should_gate_for_foreground(exe: Option<&str>) -> bool {
     match exe {
         Some(exe) if !exe.is_empty() => {
             let lower = exe.to_ascii_lowercase();
-            lower.starts_with("clipflow") || lower.starts_with("explorer")
+            lower.starts_with("yascreenclipper") || lower.starts_with("explorer")
         }
         _ => false,
     }
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn gate_mirrors_the_rust_positive_detection_rule() {
         assert!(should_gate_for_foreground(Some("explorer.exe")));
-        assert!(should_gate_for_foreground(Some("clipflow.exe")));
+        assert!(should_gate_for_foreground(Some("yascreenclipper.exe")));
         assert!(should_gate_for_foreground(Some("EXPLORER.EXE")));
         // Games, unknown processes, an empty string and a failed query all
         // keep recording.

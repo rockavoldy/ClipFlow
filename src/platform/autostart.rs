@@ -15,7 +15,7 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// Registry value name. This is the *value*, not the key path, and it is
 /// what the old Tauri plugin wrote.
-pub const VALUE_NAME: &str = "ClipFlow";
+pub const VALUE_NAME: &str = "YAScreenClipper";
 
 /// The exact command line the Run entry should hold. Quoted because the
 /// install path may contain spaces; no CLI args, since the app always starts
@@ -153,7 +153,7 @@ pub fn set(exe: Option<&std::path::Path>) -> Result<(), String> {
 #[cfg(any(not(windows), feature = "headless-sim"))]
 pub fn set(exe: Option<&std::path::Path>) -> Result<(), String> {
     log::info!(
-        "[clipflow] (stub) autostart {}",
+        "[yascreenclipper] (stub) autostart {}",
         match exe {
             Some(p) => format!("enabled -> {}", p.display()),
             None => "disabled".to_string(),
@@ -179,7 +179,7 @@ pub fn reconcile(enabled: bool) {
     }
 
     if let Err(e) = set(desired) {
-        log::warn!("[clipflow] autostart reconcile failed: {e}");
+        log::warn!("[yascreenclipper] autostart reconcile failed: {e}");
     }
 }
 
@@ -194,10 +194,10 @@ mod tests {
 
     #[test]
     fn launch_command_is_quoted_for_spaces() {
-        let exe = std::path::Path::new(r"C:\Program Files\ClipFlow\clipflow.exe");
+        let exe = std::path::Path::new(r"C:\Program Files\YAScreenClipper\yascreenclipper.exe");
         assert_eq!(
             launch_command(exe),
-            "\"C:\\Program Files\\ClipFlow\\clipflow.exe\""
+            "\"C:\\Program Files\\YAScreenClipper\\yascreenclipper.exe\""
         );
     }
 

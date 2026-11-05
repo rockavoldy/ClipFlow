@@ -215,7 +215,7 @@ impl AudioCapture {
             let gen_c = Arc::clone(&generation);
             let status_c = Arc::clone(&status);
             let h = std::thread::Builder::new()
-                .name("clipflow-audio".into())
+                .name("yascreenclipper-audio".into())
                 .spawn(move || {
                     imp::run(system, mic, gg_c, mg_c, stop_c, ring_c, gen_c, status_c, qpc_origin, qpc_freq);
                 })
@@ -705,7 +705,7 @@ mod imp {
             Err(e) => {
                 let msg = endpoint_failure(loopback, &e);
                 *status.lock() = Some(msg.clone());
-                log::warn!("[clipflow::audio] {msg}");
+                log::warn!("[yascreenclipper::audio] {msg}");
                 Err(())
             }
         }
@@ -742,7 +742,7 @@ mod imp {
             // Loopback + the AAC encoder are both *retried* forever: a game
             // holding the render device in exclusive mode makes the very first
             // `Initialize` fail with AUDCLNT_E_DEVICE_IN_USE (0x8889000A), and
-            // the AAC MFT can briefly be contended on system wake. ClipFlow
+            // the AAC MFT can briefly be contended on system wake. YAScreenClipper
             // must keep the buffer armed with video while audio sorts itself
             // out, then join seamlessly — never silently produce audio-less
             // clips for the whole session.
@@ -816,7 +816,7 @@ mod imp {
                             Err(e) => {
                                 *status.lock() =
                                     Some(format!("AAC encoder unavailable: {e}"));
-                                log::warn!("[clipflow::audio] AAC MFT: {e}");
+                                log::warn!("[yascreenclipper::audio] AAC MFT: {e}");
                             }
                         }
                     }
@@ -924,7 +924,7 @@ mod imp {
                             generation: gen,
                         });
                     }) {
-                        log::warn!("[clipflow::audio] AAC encode failed: {e}");
+                        log::warn!("[yascreenclipper::audio] AAC encode failed: {e}");
                     }
                     out_frame = next_frame;
                 }

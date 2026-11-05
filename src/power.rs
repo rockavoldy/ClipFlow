@@ -2,7 +2,7 @@
 //!
 //! The deck polls this every few seconds and runs the pure `powerPolicy`
 //! (TypeScript) over it: on battery or under memory pressure the rolling
-//! buffer shrinks live and the fps cap drops, so ClipFlow disappears from the
+//! buffer shrinks live and the fps cap drops, so YAScreenClipper disappears from the
 //! system's radar exactly when it matters. Telemetry is local and ephemeral —
 //! nothing is stored or sent anywhere.
 

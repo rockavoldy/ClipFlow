@@ -24,13 +24,13 @@ use gpui_kit::App;
 
 /// Stable AUMID. Must match `Packager.toml`'s identifier so the installed
 /// build groups its toasts under the same app entry.
-pub const APP_ID: &str = "dev.clipflow.app";
+pub const APP_ID: &str = "dev.akmd.yascreenclipper";
 
 /// Registers the AUMID and app name once, at startup. This runs before the
 /// window exists and only touches the registry, so it cannot pump messages.
 pub fn init(cx: &App) {
     // Kept so any gpui-owned notification path stays correctly attributed.
-    cx.set_app_identity(APP_ID, "ClipFlow");
+    cx.set_app_identity(APP_ID, "YAScreenClipper");
     #[cfg(all(windows, not(feature = "headless-sim")))]
     register_aumid();
 }
@@ -47,19 +47,19 @@ pub fn show(tag: &str, title: &str, body: &str) {
     #[cfg(all(windows, not(feature = "headless-sim")))]
     {
         let spawned = std::thread::Builder::new()
-            .name("clipflow-toast".into())
+            .name("yascreenclipper-toast".into())
             .spawn(move || {
                 if let Err(e) = show_blocking(&tag, &title, &body) {
-                    log::warn!("[clipflow] toast failed: {e}");
+                    log::warn!("[yascreenclipper] toast failed: {e}");
                 }
             });
         if let Err(e) = spawned {
-            log::warn!("[clipflow] could not spawn toast thread: {e}");
+            log::warn!("[yascreenclipper] could not spawn toast thread: {e}");
         }
     }
     #[cfg(any(not(windows), feature = "headless-sim"))]
     {
-        log::info!("[clipflow] (stub) toast {title}: {body}");
+        log::info!("[yascreenclipper] (stub) toast {title}: {body}");
         let _ = tag;
     }
 }
@@ -113,7 +113,7 @@ fn show_blocking(tag: &str, title: &str, body: &str) -> windows::core::Result<()
 }
 
 /// Registers `HKCU\Software\Classes\AppUserModelId\<APP_ID>` so an unpackaged
-/// `clipflow.exe` can raise toasts. gpui used to do this lazily on its first
+/// `yascreenclipper.exe` can raise toasts. gpui used to do this lazily on its first
 /// toast; since this module owns the notification path now, it owns the
 /// registration too.
 #[cfg(all(windows, not(feature = "headless-sim")))]
@@ -129,7 +129,7 @@ fn register_aumid() {
 
     let path = wide(&format!("Software\\Classes\\AppUserModelId\\{APP_ID}"));
     let name = wide("DisplayName");
-    let value = wide("ClipFlow");
+    let value = wide("YAScreenClipper");
 
     unsafe {
         let mut key = std::ptr::null_mut();
@@ -145,7 +145,7 @@ fn register_aumid() {
             std::ptr::null_mut(),
         ) != ERROR_SUCCESS
         {
-            log::warn!("[clipflow] could not register toast AUMID");
+            log::warn!("[yascreenclipper] could not register toast AUMID");
             return;
         }
         let bytes = std::slice::from_raw_parts(
@@ -155,7 +155,7 @@ fn register_aumid() {
         if RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, bytes.as_ptr(), bytes.len() as u32)
             != ERROR_SUCCESS
         {
-            log::warn!("[clipflow] could not write toast display name");
+            log::warn!("[yascreenclipper] could not write toast display name");
         }
         RegCloseKey(key);
     }
@@ -172,7 +172,7 @@ pub fn clip_saved(file_name: &str, duration_seconds: f32, trigger: &str) {
 /// privacy mode had gated the ring. Reported so the hotkey never appears to
 /// have done nothing.
 pub fn save_blocked(message: &str) {
-    show("save-blocked", "ClipFlow", message);
+    show("save-blocked", "YAScreenClipper", message);
 }
 
 #[cfg(test)]

@@ -26,7 +26,8 @@ use crate::clipmeta::{ClipMetaEntry, ClipMetaStore};
 use crate::foreground::ForegroundGame;
 use crate::media::library::{self, ClipMetadata};
 use crate::media::recorder::{
-    CaptureEngine, ClipWriteResult, Codec, EngineStats, MonitorInfo, enumerate_monitors,
+    enumerate_monitors, CaptureEngine, ClipWriteResult, Codec, EngineStats, MonitorInfo,
+    RateControl,
 };
 use crate::settings::{CaptureProfile, ProfileMapEntry, Settings};
 
@@ -45,6 +46,9 @@ pub struct AppState {
     /// point: if a flush is already running the second press is rejected with
     /// "Save replay already in progress" instead of doubling encoder work.
     pub flush_lock: Arc<parking_lot::Mutex<()>>,
+    /// Serialises encoder re-creation. Rapid edits to fps/bitrate/codec queue
+    /// behind each other instead of interleaving `stop`/`start` on the engine.
+    pub restart_lock: parking_lot::Mutex<()>,
 }
 
 impl AppState {
@@ -57,6 +61,7 @@ impl AppState {
             settings: RwLock::new(settings),
             clip_meta: Mutex::new(ClipMetaStore::load()),
             flush_lock: Arc::new(parking_lot::Mutex::new(())),
+            restart_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -94,6 +99,27 @@ impl AppState {
     pub fn stop_replay_buffer(&self) -> EngineStats {
         self.engine.stop();
         self.engine.stats()
+    }
+
+    /// Re-creates the encoder from the current settings.
+    ///
+    /// fps, bitrate, codec, rate control, GOP, monitor and audio source are
+    /// baked into the MFT when the engine starts, so a settings edit can only
+    /// take effect by rebuilding it. The restart lock serialises back-to-back
+    /// requests (typing a bitrate fires one patch per accepted value): the last
+    /// caller always ends with an encoder built from the newest settings.
+    ///
+    /// Blocking (encoder init takes 100-400 ms). Call via `background_spawn`.
+    pub fn restart_replay_buffer(&self) -> Result<EngineStats, String> {
+        let cfg = self.settings.read().to_recorder_config();
+        std::fs::create_dir_all(&cfg.output_dir).map_err(|e| e.to_string())?;
+
+        let _guard = self.restart_lock.lock();
+        if self.engine.is_running() {
+            self.engine.stop();
+        }
+        self.engine.start(cfg).map_err(|e| e.to_string())?;
+        Ok(self.engine.stats())
     }
 
     pub fn engine_stats(&self) -> EngineStats {
@@ -186,7 +212,7 @@ impl AppState {
         };
 
         log::info!(
-            "[clipflow] saved {} ({:.1}s, {:.1} MB) in {:.1} ms",
+            "[yascreenclipper] saved {} ({:.1}s, {:.1} MB) in {:.1} ms",
             clip.file_name,
             clip.duration_seconds,
             clip.size_bytes as f32 / 1_048_576.0,
@@ -469,8 +495,8 @@ impl AppState {
     }
 
     /// Applies a profile right now: the buffer window changes live on the
-    /// running engine, fps/bitrate/codec are persisted and take effect on the
-    /// next engine start.
+    /// running engine, while fps/bitrate/codec are persisted and take effect on
+    /// the next engine start (the settings panel restarts it automatically).
     pub fn apply_profile(&self, profile_id: &str) -> Result<Settings, String> {
         let mut s = self.settings.write();
         let profile = s
@@ -560,6 +586,9 @@ pub struct SettingsPatch {
     pub target_fps: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub codec: Option<Codec>,
+    pub rate_control: Option<RateControl>,
+    pub gop_seconds: Option<u32>,
+    pub quality_level: Option<u32>,
     pub monitor_index: Option<u32>,
     pub capture_system_audio: Option<bool>,
     pub capture_microphone: Option<bool>,
@@ -585,6 +614,27 @@ pub struct SettingsPatch {
     pub eco_ram_free_gbs: Option<u32>,
 }
 
+impl SettingsPatch {
+    /// Fields that are baked into the capture/encode pipeline when
+    /// [`CaptureEngine::start`] runs. A patch touching any of them only takes
+    /// effect after the engine is restarted; the deck does that automatically
+    /// while armed.
+    ///
+    /// Everything else (buffer window, volumes, topmost, privacy, output
+    /// folder) has a live path in [`PatchEffects`].
+    pub fn affects_encoder(&self) -> bool {
+        self.target_fps.is_some()
+            || self.bitrate_kbps.is_some()
+            || self.codec.is_some()
+            || self.rate_control.is_some()
+            || self.gop_seconds.is_some()
+            || self.quality_level.is_some()
+            || self.monitor_index.is_some()
+            || self.capture_system_audio.is_some()
+            || self.capture_microphone.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemReport {
@@ -602,20 +652,22 @@ pub struct SystemReport {
 /// Rejects a patch whose hotkeys would collide. Pure so the messages — which
 /// are user-facing — can be asserted without an engine or a registry.
 pub fn hotkey_conflict(patch: &SettingsPatch, current: &Settings) -> Result<(), String> {
+    use crate::platform::hotkeys::normalize_binding as norm;
+
     if let (Some(a), Some(b)) = (patch.hotkey_save.as_ref(), patch.hotkey_toggle.as_ref()) {
-        if a == b {
+        if norm(a) == norm(b) {
             return Err(format!(
                 "save and arm/disarm hotkeys cannot share the same combo '{a}'"
             ));
         }
     }
     if let Some(v) = patch.hotkey_save.as_ref() {
-        if v == &current.hotkey_toggle {
+        if norm(v) == norm(&current.hotkey_toggle) {
             return Err(format!("'{v}' is already used by the arm/disarm hotkey"));
         }
     }
     if let Some(v) = patch.hotkey_toggle.as_ref() {
-        if v == &current.hotkey_save {
+        if norm(v) == norm(&current.hotkey_save) {
             return Err(format!("'{v}' is already used by the save hotkey"));
         }
     }
@@ -630,6 +682,8 @@ pub struct PatchEffects {
     pub live_buffer_seconds: Option<u32>,
     /// New audio mix (already clamped), if either volume changed.
     pub volumes: Option<(u32, u32)>,
+    /// New output folder, if the patch changed it.
+    pub output_dir: Option<std::path::PathBuf>,
     /// Desired topmost flag, if the patch changed it.
     pub topmost: Option<bool>,
     /// Desired privacy gate, if privacy mode was toggled on.
@@ -647,6 +701,11 @@ impl PatchEffects {
         }
         if let Some((game, mic)) = self.volumes {
             engine.set_audio_volumes(game, mic);
+        }
+        if let Some(dir) = self.output_dir.as_ref() {
+            // Follow the new folder on the running engine so the next flush
+            // lands where the gallery is scanning, without a restart.
+            engine.set_output_dir(dir.clone());
         }
         if let Some(topmost) = self.topmost {
             apply_topmost(topmost);
@@ -689,6 +748,15 @@ pub fn apply_patch_values(
     if let Some(v) = patch.codec {
         settings.codec = v;
     }
+    if let Some(v) = patch.rate_control {
+        settings.rate_control = v;
+    }
+    if let Some(v) = patch.gop_seconds {
+        settings.gop_seconds = v.clamp(1, 10);
+    }
+    if let Some(v) = patch.quality_level {
+        settings.quality_level = v.clamp(1, 100);
+    }
     if let Some(v) = patch.monitor_index {
         settings.monitor_index = v;
     }
@@ -701,6 +769,7 @@ pub fn apply_patch_values(
     if let Some(v) = patch.output_dir.as_ref() {
         std::fs::create_dir_all(v).map_err(|e| e.to_string())?;
         settings.output_dir = v.clone();
+        effects.output_dir = Some(std::path::PathBuf::from(v.as_str()));
     }
     if let Some(v) = patch.open_trimmer_after_save {
         settings.open_trimmer_after_save = v;
@@ -780,10 +849,10 @@ pub fn apply_patch_values(
 
 /// Sanitises a foreground exe into a safe per-game folder name. Returns `None`
 /// for our own process so pressing `Alt+C` on the deck never creates a
-/// "clipflow" folder.
+/// "yascreenclipper" folder.
 pub fn game_folder_name(exe: &str) -> Option<String> {
     let exe = exe.to_ascii_lowercase();
-    if exe.starts_with("clipflow") {
+    if exe.starts_with("yascreenclipper") {
         return None;
     }
     let stem = match exe.rfind('.') {
@@ -829,7 +898,7 @@ pub fn resolve_game_folder(state: &AppState, game_override: Option<&str>) -> Opt
 /// the main thread (no blocking `GetWindowTextW`).
 pub fn privacy_should_gate() -> bool {
     match crate::foreground::foreground_exe() {
-        Some(e) => e.starts_with("clipflow") || e.starts_with("explorer"),
+        Some(e) => e.starts_with("yascreenclipper") || e.starts_with("explorer"),
         None => false,
     }
 }
@@ -876,7 +945,7 @@ pub fn safe_to_raise_for(focused_exe: Option<&str>) -> bool {
     match focused_exe {
         Some(exe) => {
             let exe = exe.to_ascii_lowercase();
-            exe.starts_with("clipflow") || exe.starts_with("explorer")
+            exe.starts_with("yascreenclipper") || exe.starts_with("explorer")
         }
         None => false,
     }
@@ -919,17 +988,17 @@ mod tests {
         assert_eq!(game_folder_name("cs2.exe").as_deref(), Some("cs2"));
         assert_eq!(game_folder_name("Elden Ring.exe").as_deref(), Some("elden-ring"));
         // Our own process never creates a folder.
-        assert_eq!(game_folder_name("clipflow.exe"), None);
-        assert_eq!(game_folder_name("clipflow_lib.exe"), None);
+        assert_eq!(game_folder_name("yascreenclipper.exe"), None);
+        assert_eq!(game_folder_name("yascreenclipper_lib.exe"), None);
         // A name made only of separators sanitises to nothing.
         assert_eq!(game_folder_name("   .exe"), None);
     }
 
     #[test]
     fn safe_to_raise_only_for_our_own_windows() {
-        assert!(safe_to_raise_for(Some("clipflow.exe")));
+        assert!(safe_to_raise_for(Some("yascreenclipper.exe")));
         assert!(safe_to_raise_for(Some("explorer.exe")));
-        assert!(safe_to_raise_for(Some("CLIPFLOW.EXE")));
+        assert!(safe_to_raise_for(Some("YASCREENCLIPPER.EXE")));
         // A game, an unknown process, and an undetectable foreground are all
         // "do not steal focus".
         assert!(!safe_to_raise_for(Some("cs2.exe")));
@@ -953,6 +1022,18 @@ mod tests {
         let patch = SettingsPatch {
             hotkey_save: Some("Alt+C".into()),
             hotkey_toggle: Some("Alt+C".into()),
+            ..Default::default()
+        };
+        let err = hotkey_conflict(&patch, &current).unwrap_err();
+        assert!(err.contains("cannot share the same combo"), "{err}");
+    }
+
+    #[test]
+    fn rejects_the_same_gamepad_button_for_both_hotkeys() {
+        let current = defaults();
+        let patch = SettingsPatch {
+            hotkey_save: Some("Pad+0".into()),
+            hotkey_toggle: Some("pad+button 0".into()),
             ..Default::default()
         };
         let err = hotkey_conflict(&patch, &current).unwrap_err();
@@ -994,6 +1075,9 @@ mod tests {
             buffer_seconds: Some(1),
             target_fps: Some(999),
             bitrate_kbps: Some(1),
+            rate_control: Some(RateControl::Quality),
+            gop_seconds: Some(99),
+            quality_level: Some(0),
             game_volume: Some(500),
             mic_volume: Some(500),
             eco_battery_threshold_pct: Some(0),
@@ -1005,6 +1089,9 @@ mod tests {
         assert_eq!(s.buffer_seconds, 5);
         assert_eq!(s.target_fps, 240);
         assert_eq!(s.bitrate_kbps, 3_000);
+        assert_eq!(s.rate_control, RateControl::Quality);
+        assert_eq!(s.gop_seconds, 10);
+        assert_eq!(s.quality_level, 1);
         assert_eq!(s.game_volume, 100);
         assert_eq!(s.mic_volume, 100);
         assert_eq!(s.eco_battery_threshold_pct, 5);
@@ -1013,6 +1100,66 @@ mod tests {
         // ...and the engine-facing side effects carry the clamped values.
         assert_eq!(effects.live_buffer_seconds, Some(5));
         assert_eq!(effects.volumes, Some((100, 100)));
+    }
+
+    #[test]
+    fn only_engine_baked_fields_require_a_restart() {
+        // Every field the MFT/capture stack reads at `CaptureEngine::start`.
+        for patch in [
+            SettingsPatch {
+                target_fps: Some(120),
+                ..Default::default()
+            },
+            SettingsPatch {
+                bitrate_kbps: Some(20_000),
+                ..Default::default()
+            },
+            SettingsPatch {
+                codec: Some(Codec::Hevc),
+                ..Default::default()
+            },
+            SettingsPatch {
+                rate_control: Some(RateControl::Vbr),
+                ..Default::default()
+            },
+            SettingsPatch {
+                gop_seconds: Some(2),
+                ..Default::default()
+            },
+            SettingsPatch {
+                quality_level: Some(90),
+                ..Default::default()
+            },
+            SettingsPatch {
+                monitor_index: Some(1),
+                ..Default::default()
+            },
+            SettingsPatch {
+                capture_system_audio: Some(false),
+                ..Default::default()
+            },
+            SettingsPatch {
+                capture_microphone: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                patch.affects_encoder(),
+                "{patch:?} must restart the encoder"
+            );
+        }
+
+        // These all have a live path in `PatchEffects`.
+        let live = SettingsPatch {
+            buffer_seconds: Some(30),
+            game_volume: Some(50),
+            mic_volume: Some(50),
+            always_on_top: Some(true),
+            privacy_pause_when_unfocused: Some(true),
+            output_dir: Some("C:\\clips".into()),
+            ..Default::default()
+        };
+        assert!(!live.affects_encoder());
     }
 
     #[test]
@@ -1068,7 +1215,7 @@ mod tests {
             "monitorIndex": 1,
             "captureSystemAudio": true,
             "captureMicrophone": false,
-            "outputDir": "C:\\Users\\me\\Videos\\ClipFlow",
+            "outputDir": "C:\\Users\\me\\Videos\\YAScreenClipper",
             "hotkeySave": "Alt+C",
             "hotkeyToggle": "Alt+Shift+C",
             "openTrimmerAfterSave": true,
@@ -1083,12 +1230,16 @@ mod tests {
         // Defaults fill in everything the old file did not have.
         assert_eq!(parsed.game_volume, 100);
         assert_eq!(parsed.eco_battery_threshold_pct, 30);
+        assert_eq!(parsed.rate_control, RateControl::Cbr);
+        assert_eq!(parsed.gop_seconds, 1);
+        assert_eq!(parsed.quality_level, 80);
         assert!(parsed.organize_by_game, "defaults to true, as before");
 
         // And the round trip keeps the camelCase shape an older build reads.
         let resaved = serde_json::to_string(&parsed).unwrap();
         assert!(resaved.contains("\"bufferSeconds\":45"));
         assert!(resaved.contains("\"hotkeyToggle\":\"Alt+Shift+C\""));
+        assert!(resaved.contains("\"rateControl\":\"cbr\""));
         let reparsed: Settings = serde_json::from_str(&resaved).unwrap();
         assert_eq!(reparsed.buffer_seconds, parsed.buffer_seconds);
     }
@@ -1103,6 +1254,7 @@ mod tests {
             settings: RwLock::new(defaults()),
             clip_meta: Mutex::new(empty_clip_meta()),
             flush_lock: Arc::new(parking_lot::Mutex::new(())),
+            restart_lock: parking_lot::Mutex::new(()),
         };
         // `game_override` bypasses the privacy check, so this reaches the
         // engine itself: an idle engine has no ring and must fail cleanly.

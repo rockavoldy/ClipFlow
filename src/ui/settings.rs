@@ -25,6 +25,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use crate::media::recorder::RateControl;
 use crate::power::PowerState;
 use crate::state::SettingsPatch;
 use crate::ui::deck::{Deck, HotkeyAction};
@@ -35,6 +36,11 @@ use crate::ui::theme::Palette;
 pub const BUFFER_PRESETS: [u32; 5] = [15, 30, 60, 120, 300];
 /// FPS presets from the old settings panel.
 pub const FPS_PRESETS: [u32; 4] = [30, 60, 120, 144];
+/// GOP lengths in seconds. 1 s keeps clips frame-accurate; longer values
+/// compress better because fewer key frames are spent.
+pub const GOP_PRESETS: [u32; 3] = [1, 2, 5];
+/// CQ targets. Higher means better image quality at a larger file size.
+pub const QUALITY_PRESETS: [u32; 4] = [70, 80, 90, 95];
 /// Bitrate numeric bounds, `step 1000`.
 pub const BITRATE_MIN: u32 = 3_000;
 pub const BITRATE_MAX: u32 = 30_000;
@@ -86,9 +92,11 @@ impl Deck {
                                     .text_xs()
                                     .text_color(palette.muted)
                                     .child(format!(
-                                        "{} · {} Mbps",
+                                        "{} · {} Mbps · {} · {}s GOP",
                                         settings.codec.as_str(),
-                                        settings.bitrate_kbps / 1000
+                                        settings.bitrate_kbps / 1000,
+                                        settings.rate_control.as_str(),
+                                        settings.gop_seconds
                                     )),
                             ),
                     ),
@@ -180,6 +188,140 @@ impl Deck {
                                 },
                             )
                         })),
+            ))
+            .child(self.section(
+                palette,
+                "RATE CONTROL",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .children(
+                                [RateControl::Cbr, RateControl::Vbr, RateControl::Quality]
+                                    .into_iter()
+                                    .map(|mode| {
+                                        self.preset_button(
+                                            palette,
+                                            format!(
+                                                "rate-{}",
+                                                mode.as_str().to_ascii_lowercase()
+                                            ),
+                                            mode.as_str().to_string(),
+                                            settings.rate_control == mode,
+                                            cx,
+                                            move |deck, cx| {
+                                                deck.apply_patch(
+                                                    SettingsPatch {
+                                                        rate_control: Some(mode),
+                                                        ..Default::default()
+                                                    },
+                                                    cx,
+                                                );
+                                            },
+                                        )
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .font_family(crate::ui::theme::MONO)
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child(match settings.rate_control {
+                                RateControl::Cbr => {
+                                    "Constant bitrate — predictable file size and RAM ceiling."
+                                }
+                                RateControl::Vbr => {
+                                    "Average bitrate with a bounded peak — better quality, similar size."
+                                }
+                                RateControl::Quality => {
+                                    "Constant quality — ignores the bitrate target; file sizes vary."
+                                }
+                            }),
+                    ),
+            ))
+            .child(self.section(
+                palette,
+                "GOP",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .children(GOP_PRESETS.into_iter().map(|seconds| {
+                                self.preset_button(
+                                    palette,
+                                    format!("gop-{seconds}"),
+                                    format!("{seconds}s"),
+                                    settings.gop_seconds == seconds,
+                                    cx,
+                                    move |deck, cx| {
+                                        deck.apply_patch(
+                                            SettingsPatch {
+                                                gop_seconds: Some(seconds),
+                                                ..Default::default()
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .font_family(crate::ui::theme::MONO)
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child("Seconds between key frames. Longer compresses better; 1s keeps clips frame-accurate."),
+                    ),
+            ))
+            .child(self.section(
+                palette,
+                "CQ QUALITY",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .children(QUALITY_PRESETS.into_iter().map(|level| {
+                                self.preset_button(
+                                    palette,
+                                    format!("quality-{level}"),
+                                    level.to_string(),
+                                    settings.quality_level == level,
+                                    cx,
+                                    move |deck, cx| {
+                                        deck.apply_patch(
+                                            SettingsPatch {
+                                                quality_level: Some(level),
+                                                ..Default::default()
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .font_family(crate::ui::theme::MONO)
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child("Only used when rate control is CQ. Higher is better and slower."),
+                    ),
             ))
             .child(self.section(
                 palette,
@@ -276,7 +418,15 @@ impl Deck {
                         &settings.hotkey_toggle,
                         HotkeyAction::Toggle,
                         cx,
-                    )),
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child(
+                                "Click a badge, then press a key combination or a controller button.",
+                            ),
+                    ),
             ))
             // --- storage ---------------------------------------------------
             .child(self.section(
@@ -344,7 +494,7 @@ impl Deck {
             .child(self.toggle_row(
                 palette,
                 "Arm on launch",
-                "Start the rolling buffer as soon as ClipFlow opens.",
+                "Start the rolling buffer as soon as YAScreenClipper opens.",
                 settings.autostart_buffer,
                 cx,
                 |deck, value, cx| {
@@ -360,7 +510,7 @@ impl Deck {
             .child(self.toggle_row(
                 palette,
                 "Launch at startup",
-                "Start ClipFlow hidden in the tray when Windows signs in.",
+                "Start YAScreenClipper hidden in the tray when Windows signs in.",
                 settings.launch_at_startup,
                 cx,
                 |deck, value, cx| {
@@ -510,7 +660,7 @@ impl Deck {
                                     .font_family(crate::ui::theme::MONO)
                                     .text_xs()
                                     .text_color(palette.muted)
-                                    .child(format!("ClipFlow v{}", env!("CARGO_PKG_VERSION"))),
+                                    .child(format!("YAScreenClipper v{}", env!("CARGO_PKG_VERSION"))),
                             )
                             .child(
                                 div()
@@ -553,7 +703,7 @@ impl Deck {
                                             if let Err(e) =
                                                 crate::platform::update::open_releases_page()
                                             {
-                                                log::warn!("[clipflow] {e}");
+                                                log::warn!("[yascreenclipper] {e}");
                                             }
                                         });
                                     })),

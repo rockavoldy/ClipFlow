@@ -185,7 +185,7 @@ pub fn shell_open(path: &std::path::Path, reveal: bool) -> Result<(), String> {
 #[cfg(any(not(windows), feature = "headless-sim"))]
 pub fn shell_open(path: &std::path::Path, reveal: bool) -> Result<(), String> {
     log::info!(
-        "[clipflow] (stub) {} {}",
+        "[yascreenclipper] (stub) {} {}",
         if reveal { "reveal" } else { "open" },
         path.display()
     );
@@ -274,7 +274,7 @@ pub fn copy_files_to_clipboard(paths: &[std::path::PathBuf]) -> Result<(), Strin
         }
     }
     let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-    log::info!("[clipflow] (stub) copied to clipboard: {}", names.join(", "));
+    log::info!("[yascreenclipper] (stub) copied to clipboard: {}", names.join(", "));
     Ok(())
 }
 

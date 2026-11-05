@@ -11,10 +11,10 @@ name: Release
 # which reads `[package.metadata.packager]` in `Cargo.toml` and produces, in
 # `target/release`:
 #
-#   clipflow_<version>_x64-setup.exe    NSIS installer
-#   clipflow_<version>_x64_en-US.msi    WiX installer
+#   yascreenclipper_<version>_x64-setup.exe    NSIS installer
+#   yascreenclipper_<version>_x64_en-US.msi    WiX installer
 #
-# The portable build is the release binary itself (`clipflow.exe`).
+# The portable build is the release binary itself (`yascreenclipper.exe`).
 #
 # `latest.json` is published alongside the installers because the in-app
 # "Check for updates" row in Settings probes
@@ -156,31 +156,31 @@ jobs:
         run: |
           $out = "target/release"
           # cargo-packager names the installers after the *binary*, so they come
-          # out as `clipflow_<version>_x64-...`. Rename them to the product
+          # out as `yascreenclipper_<version>_x64-...`. Rename them to the product
           # name the README and past releases use.
           #
           # `${env:VERSION}` needs the braces: without them PowerShell reads
           # `$env:VERSION_x64` as one (undefined) variable name.
-          $setup = Join-Path $out "clipflow_${env:VERSION}_x64-setup.exe"
-          $msi = Join-Path $out "clipflow_${env:VERSION}_x64_en-US.msi"
-          $binary = Join-Path $out "clipflow.exe"
+          $setup = Join-Path $out "yascreenclipper_${env:VERSION}_x64-setup.exe"
+          $msi = Join-Path $out "yascreenclipper_${env:VERSION}_x64_en-US.msi"
+          $binary = Join-Path $out "yascreenclipper.exe"
 
           foreach ($f in @($setup, $msi, $binary)) {
             if (-not (Test-Path $f)) { throw "expected artifact missing: $f" }
           }
 
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item $setup "artifacts/ClipFlow_${env:VERSION}_x64-setup.exe"
-          Copy-Item $msi "artifacts/ClipFlow_${env:VERSION}_x64_en-US.msi"
+          Copy-Item $setup "artifacts/YAScreenClipper_${env:VERSION}_x64-setup.exe"
+          Copy-Item $msi "artifacts/YAScreenClipper_${env:VERSION}_x64_en-US.msi"
           # The portable build gets a friendlier name, matching the layout the
           # README documents.
-          Copy-Item $binary "artifacts/ClipFlow_v${env:VERSION}_Portable.exe"
+          Copy-Item $binary "artifacts/YAScreenClipper_v${env:VERSION}_Portable.exe"
 
           # `latest.json` is what the in-app update probe reads. Only the
           # version is needed: signed auto-install is deferred.
           $manifest = @{
             version = $env:VERSION
-            notes = "ClipFlow $env:VERSION"
+            notes = "YAScreenClipper $env:VERSION"
             pub_date = (Get-Date).ToUniversalTime().ToString("o")
             platforms = @{}
           }
@@ -189,7 +189,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: clipflow-${{ steps.version.outputs.version }}-windows
+          name: yascreenclipper-${{ steps.version.outputs.version }}-windows
           path: artifacts/
           if-no-files-found: error
 
@@ -200,9 +200,9 @@ jobs:
         with:
           files: artifacts/*
           tag_name: ${{ steps.version.outputs.tag }}
-          name: ClipFlow ${{ steps.version.outputs.version }}
+          name: YAScreenClipper ${{ steps.version.outputs.version }}
           body: |
-            Windows installers for ClipFlow ${{ steps.version.outputs.version }}.
+            Windows installers for YAScreenClipper ${{ steps.version.outputs.version }}.
 
             * **NSIS setup** (`-setup.exe`) — recommended, installs per-user and adds a Start-menu shortcut.
             * **MSI** (`_x64_en-US.msi`) — for managed/silent deployments.

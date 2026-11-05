@@ -1,14 +1,16 @@
 //! Hotkey recording.
 //!
-//! Click a badge, press a chord, done. The badge is an ordinary element with a
-//! click handler; the *capture* is driven from the deck's `on_key_down`, which
-//! means a recorded chord can never also trigger a widget shortcut while the
-//! recorder is armed.
+//! Click a badge, press a chord **or a controller button**, done. The badge is
+//! an ordinary element with a click handler; keyboard capture is driven from
+//! the deck's `on_key_down` and gamepad capture from the `runtime::gamepad`
+//! drain, which means a recorded input can never also trigger a widget
+//! shortcut or the old binding while the recorder is armed.
 //!
 //! The formatting rules live in [`crate::platform::hotkeys::accelerator_from_chord`]
 //! and produce exactly the `"Ctrl+Alt+Shift+F9"` shape the old
 //! `acceleratorFromEvent` produced, so strings already in `settings.json` stay
-//! valid.
+//! valid. Gamepad presses are stored as `"Pad+<n>"` (see
+//! [`crate::platform::gamepad`]) in the same field.
 //!
 //! Ordering contract, inherited from the Tauri build and **not** to be
 //! "simplified": the new chord is registered with the OS *before* the settings
@@ -17,6 +19,7 @@
 
 use gpui_kit::{Context, KeyDownEvent, Window};
 
+use crate::platform::gamepad::GamepadButton;
 use crate::state::SettingsPatch;
 use crate::ui::deck::{Deck, HotkeyAction};
 
@@ -72,21 +75,53 @@ impl Deck {
 
         // Validate *before* leaving record mode so an invalid combo keeps the
         // badge armed instead of silently doing nothing.
-        if let Err(e) = crate::platform::hotkeys::validate(&chord) {
+        if let Err(e) = crate::platform::hotkeys::validate_binding(&chord) {
             self.recording_hotkey = None;
             self.status_error("Hotkey not accepted", &e);
             cx.notify();
             return;
         }
 
+        self.commit_hotkey(action, chord, cx);
+    }
+
+    /// Feeds a gamepad press into the recorder, or dispatches the action bound
+    /// to that button when the recorder is idle.
+    ///
+    /// The backend pushes every press through this method, so the "record vs.
+    /// fire" decision lives in one place and a press made while the badge is
+    /// armed can never also trigger the old binding.
+    pub fn on_gamepad_button(&mut self, button: GamepadButton, cx: &mut Context<Self>) {
+        if let Some(action) = self.recording_hotkey {
+            let accelerator = button.accelerator();
+            if let Err(e) = crate::platform::hotkeys::validate_binding(&accelerator) {
+                self.recording_hotkey = None;
+                self.status_error("Hotkey not accepted", &e);
+                cx.notify();
+                return;
+            }
+            self.commit_hotkey(action, accelerator, cx);
+            return;
+        }
+
+        let intent = { self.hotkeys.lock().intent_for_button(button) };
+        if let Some(intent) = intent {
+            self.handle_intent(intent, cx);
+        }
+    }
+
+    /// Registers + persists one recorded value. Both input devices share this
+    /// path, so the all-or-nothing patch ordering is identical for a key and a
+    /// pad button.
+    fn commit_hotkey(&mut self, action: HotkeyAction, accelerator: String, cx: &mut Context<Self>) {
         self.recording_hotkey = None;
         let patch = match action {
             HotkeyAction::Save => SettingsPatch {
-                hotkey_save: Some(chord),
+                hotkey_save: Some(accelerator),
                 ..Default::default()
             },
             HotkeyAction::Toggle => SettingsPatch {
-                hotkey_toggle: Some(chord),
+                hotkey_toggle: Some(accelerator),
                 ..Default::default()
             },
         };
@@ -94,12 +129,12 @@ impl Deck {
         self.apply_patch(patch, cx);
     }
 
-    /// Badge label: the chord, or a prompt while recording.
+    /// Badge label: the chord / pad button, or a prompt while recording.
     pub fn hotkey_badge_label(&self, action: HotkeyAction, accelerator: &str) -> String {
         if self.recording_hotkey == Some(action) {
-            "PRESS KEYS… (Esc cancels)".to_string()
+            "PRESS A KEY OR PAD BUTTON… (Esc cancels)".to_string()
         } else {
-            accelerator.to_string()
+            crate::platform::hotkeys::binding_label(accelerator)
         }
     }
 }

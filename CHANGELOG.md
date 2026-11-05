@@ -1,18 +1,26 @@
 # Changelog
 
-All notable changes to **ClipFlow** are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
+All notable changes to **YAScreenClipper** are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — Tauri → GPUI migration
 
-ClipFlow's UI moved from a Tauri v2 shell + React/WebView2 frontend to a **native
+YAScreenClipper's UI moved from a Tauri v2 shell + React/WebView2 frontend to a **native
 GPUI** desktop app. The capture engine is unchanged; the shell, the UI and the
 IPC layer are gone.
+
+### Added
+
+- **Hotkeys can bind a controller button.** Clicking a hotkey badge and pressing
+  a gamepad button records it as `Pad+<n>` in the same `hotkeySave` /
+  `hotkeyToggle` field as a keyboard chord; the badge shows `Button 0`,
+  `Button 1`, etc. `gilrs` drives the backend so controllers Windows does not
+  expose through XInput work too.
 
 ### Changed
 
 - **Native UI (gpui-kit 0.9 / gpui-pre 0.3.11).** One window, one Rust view tree.
   No WebView2 runtime, no Node build step, no IPC bridge. The release artifact
-  is a single `clipflow.exe` plus the usual NSIS/MSI installers.
+  is a single `yascreenclipper.exe` plus the usual NSIS/MSI installers.
 - **Neutral, barebones UI.** The neon cyan/magenta/lime palette and the brand
   logotype are gone. The deck is light-only: white content, `#F3F3F3`
   titlebar/footer, one-pixel `#DEDEDE` borders, near-black filled buttons and
@@ -20,22 +28,22 @@ IPC layer are gone.
   error red).
 - **Native Win32 window chrome.** The frameless custom titlebar is gone, along
   with its Hide and Quit buttons. Windows draws close, minimize and maximize,
-  and the window title is `ClipFlow`.
-- **`settings.json` is byte-compatible.** Same path (`%APPDATA%\ClipFlow`), same
+  and the window title is `YAScreenClipper`.
+- **`settings.json` is byte-compatible.** Same path (`%APPDATA%\YAScreenClipper`), same
   field names and clamps; an existing install keeps its settings, hotkeys,
   favourites and tags. Fields belonging to deferred features are still persisted
   and simply unused.
 - **Save feedback is inverted on purpose.** Previously a toast appeared only when
   the trimmer was *not* going to open. Now every hotkey/tray save raises a native
   toast, and the deck is raised *in addition* only when the foreground is
-  positively ClipFlow or the desktop. This is the documented behaviour change
+  positively YAScreenClipper or the desktop. This is the documented behaviour change
   from the migration Q&A, not a regression.
 - **Build requirements:** Rust **1.98+** (edition 2021), Visual Studio C++ build
   tools + Windows SDK. Node.js is no longer required. The floor is 1.98
   because the GPUI stack uses `Option::map_or_default`, stabilised in 1.98.0.
 - **The app icon is compiled into the executable.** `icons/icon.ico` is embedded
   as a Windows resource, so the `.exe`, the Start-menu shortcut and the installed
-  application show the ClipFlow icon instead of the generic Windows one. The
+  application show the YAScreenClipper icon instead of the generic Windows one. The
   NSIS installer carries the same icon.
 
 ### Fixed
@@ -98,6 +106,19 @@ IPC layer are gone.
   payloads while priming or more than one while catching up; output frames are
   now numbered independently (strictly increasing, gaps preserved), and encode
   failures are logged instead of silently swallowed.
+- **Bitrate/FPS/codec/GOP changes now actually reach the encoder.** They are
+  baked into the Media Foundation transform when the engine starts, so editing
+  them used to persist the value but leave the running encoder untouched (the
+  deck still claimed “Applied immediately”). Saving one of those fields while
+  armed now restarts the encoder automatically (serialised, with the status
+  line reporting the result); while disarmed, the UI says it applies on the next
+  arm. Changing the output folder is now applied to the running engine live.
+- **Rate control, GOP length and CQ quality are configurable.** The old encoder
+  hard-coded CBR, a 1-second key-frame interval and the driver's default quality
+  target, which made low-bitrate captures look soft. Settings now exposes CBR /
+  VBR / CQ, a 1/2/5-second GOP, and a CQ target (70/80/90/95), persisted as
+  `rateControl`, `gopSeconds` and `qualityLevel` with backward-compatible
+  defaults.
 
 ### Deferred (documented regressions, tracked for follow-ups)
 
@@ -223,7 +244,7 @@ code are retained so a later plan can restore them without a migration.
 
 ### Fixed
 
-- **Privacy mode could block Alt+C mid-match** — games running elevated or behind anti-cheat deny `OpenProcess` from a non-admin ClipFlow, so the game was "not detected" and privacy stayed paused (empty ring + blocked saves). Foreground detection now resolves the exe through a **process snapshot** (`CreateToolhelp32Snapshot`) that needs no handle to the target, and the gate flipped to an **optimistic default**: pause only when the foreground is positively ClipFlow or the desktop — a failed query keeps recording so Alt+C never breaks.
+- **Privacy mode could block Alt+C mid-match** — games running elevated or behind anti-cheat deny `OpenProcess` from a non-admin YAScreenClipper, so the game was "not detected" and privacy stayed paused (empty ring + blocked saves). Foreground detection now resolves the exe through a **process snapshot** (`CreateToolhelp32Snapshot`) that needs no handle to the target, and the gate flipped to an **optimistic default**: pause only when the foreground is positively YAScreenClipper or the desktop — a failed query keeps recording so Alt+C never breaks.
 - **Split at playhead was flaky** — two back-to-back Media Foundation trim sessions raced startup/shutdown and failed in bursts. Splitting now runs as **one native task** (probe duration, two sequential stream-copy trims with a beat between sessions); a failed split cleans up both half-files so no stray `.mp4` lingers.
 - **App sluggish with privacy on** — the 2 s foreground poll could flap the gate and wipe the ring buffer repeatedly. The gate now has a **5 s hysteresis window**: a quick alt-tab or detection blip never pauses, clears or spams toasts; turning privacy off un-gates immediately.
 
@@ -236,7 +257,7 @@ code are retained so a later plan can restore them without a migration.
 ### Added
 
 - **🏷️ Clips tagged with their game** — every save is tagged with the game in the foreground (`cs2`, `eldenring`...). The tag survives restarts because it is derived from the clip's folder, no sidecar files. The gallery gains a per-game **filter dropdown** and each card shows a game badge.
-- **📁 Per-game folders** — with *Organize clips by game* on, clips land in `Videos/ClipFlow/<game>/`. The library scan is recursive, so old root clips and new sub-folder clips appear together. Stats and cleanup cover the whole tree.
+- **📁 Per-game folders** — with *Organize clips by game* on, clips land in `Videos/YAScreenClipper/<game>/`. The library scan is recursive, so old root clips and new sub-folder clips appear together. Stats and cleanup cover the whole tree.
 - **📊 Stats dashboard** — a new **STATS** tab: total clips, storage used, this-week counters, games tagged, plus a per-game breakdown with bytes bars.
 - **🖥️ On-screen REC HUD** — an always-on-top, click-through indicator (● REC · buffered seconds) pinned to the corner of the screen while the buffer is armed. Toggle in Settings → Workflow.
 - **✂️ Split at playhead** — the trimmer can cut a clip in two at the current frame (two stream-copy trims, no re-encode) with the new **SPLIT AT PLAYHEAD** button.
@@ -244,8 +265,8 @@ code are retained so a later plan can restore them without a migration.
 
 ### Fixed
 
-- **Audio capture retries + visible errors** — games holding the audio device in *exclusive mode* made the WASAPI loopback fail with `AUDCLNT_E_DEVICE_IN_USE` and ClipFlow would silently record clips with no audio track. The audio thread now retries every second until the device is free, and the real reason is surfaced on the deck (red *WASAPI loopback* stage in the pipeline + toast on change).
-- **Alt+C no longer steals focus from games** — saving with the hotkey used to raise and focus the ClipFlow window, which minimised or paused fullscreen-exclusive games. Now, when a game has focus, the save happens without touching the window and is confirmed with a native Windows toast (toasts don't steal focus). Auto-saves and tray saves never open the trimmer either.
+- **Audio capture retries + visible errors** — games holding the audio device in *exclusive mode* made the WASAPI loopback fail with `AUDCLNT_E_DEVICE_IN_USE` and YAScreenClipper would silently record clips with no audio track. The audio thread now retries every second until the device is free, and the real reason is surfaced on the deck (red *WASAPI loopback* stage in the pipeline + toast on change).
+- **Alt+C no longer steals focus from games** — saving with the hotkey used to raise and focus the YAScreenClipper window, which minimised or paused fullscreen-exclusive games. Now, when a game has focus, the save happens without touching the window and is confirmed with a native Windows toast (toasts don't steal focus). Auto-saves and tray saves never open the trimmer either.
 
 ## [1.1.3] - 2026-08-09
 
@@ -254,7 +275,7 @@ code are retained so a later plan can restore them without a migration.
 - **Three-tab navigation** — the side rail is now PIPELINE · PROFILES · SETTINGS. The capture profiles moved to their own tab, so Settings no longer scrolls forever.
 - **Quick profile switch in the deck** — one-click profile chips (Default / Competitivo / Cine) under the GAME · PROFILE indicator, no Settings needed.
 - **Native notification on auto profile switch** — Windows toast when the foreground game changes your capture profile (manual applies stay quiet).
-- **Launch at startup** — Settings → Workflow: start ClipFlow hidden to tray at Windows sign-in (registry Run key, kept in sync with the setting).
+- **Launch at startup** — Settings → Workflow: start YAScreenClipper hidden to tray at Windows sign-in (registry Run key, kept in sync with the setting).
 - **Auto cleanup** — Settings → Workflow: delete clips older than 7/14/30/60 days at every launch to keep the folder tidy.
 
 ## [1.1.2] - 2026-08-09
@@ -262,7 +283,7 @@ code are retained so a later plan can restore them without a migration.
 ### Added
 
 - **Per-game capture profiles** — make a few generic presets (e.g. *Default*, *Competitivo* with a short buffer, *Cine* with HEVC + long buffer) and map foreground games to them. The buffer window applies live the moment a profile is applied; fps, bitrate and codec apply on the next engine start.
-- **Auto-switch by foreground game** — with the toggle on, ClipFlow watches which window has focus and applies the mapped profile automatically (2 s poll, anti-flap cooldown). Unmapped games and the desktop fall back to the *Default* profile. Focus detection is a single cheap Win32 query (`GetForegroundWindow` + process image name), polled off the main thread.
+- **Auto-switch by foreground game** — with the toggle on, YAScreenClipper watches which window has focus and applies the mapped profile automatically (2 s poll, anti-flap cooldown). Unmapped games and the desktop fall back to the *Default* profile. Focus detection is a single cheap Win32 query (`GetForegroundWindow` + process image name), polled off the main thread.
 - **Game mapping editor** — Settings → CAPTURE PROFILES: add/rename/delete profiles, and map any executable (e.g. `cs2.exe`) to a profile. The deck shows the current **GAME · PROFILE** chip at a glance.
 
 ## [1.1.1] - 2026-08-09
@@ -270,7 +291,7 @@ code are retained so a later plan can restore them without a migration.
 ### Added
 
 - **Session counter** in the Instant Replay panel: clips + bytes saved during the current run.
-- Release pipeline now ships the **portable exe** on every release (`ClipFlow_vX.Y.Z_Portable.exe`).
+- Release pipeline now ships the **portable exe** on every release (`YAScreenClipper_vX.Y.Z_Portable.exe`).
 
 ### Fixed
 
@@ -285,7 +306,7 @@ code are retained so a later plan can restore them without a migration.
 - **HEVC (H.265) codec** — new toggle in Settings. Roughly halves file size while keeping hardware encoding (NVENC/AMF/QSV); applies on engine restart.
 - **Open in external player** — new `▶` button on gallery cards and in the trimmer to play a clip in your default media player.
 - **Rename clips** — inline rename in the trimmer (the header filename becomes editable).
-- **PNG snapshots** — `◉ SNAPSHOT PNG` in the trimmer captures the current frame (hardware decode) into the ClipFlow output folder.
+- **PNG snapshots** — `◉ SNAPSHOT PNG` in the trimmer captures the current frame (hardware decode) into the YAScreenClipper output folder.
 - **Gallery sort & filters** — sort by newest/oldest/largest/smallest/longest/shortest, an `♪ AUDIO` filter, and a `▦ COMPACT` grid view.
 - **Clear library** — `✕ CLEAR` removes every clip with an explicit confirmation dialog.
 - **Save confirmation sound** — the `playSaveSound` setting now actually works: a short locally-generated shutter blip on every flush.

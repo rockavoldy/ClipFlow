@@ -15,7 +15,7 @@
 //!
 //! # Why there is no event bus
 //!
-//! The Tauri build emitted `clipflow://clip-saved`, and `App.tsx` had one
+//! The Tauri build emitted `yascreenclipper://clip-saved`, and `App.tsx` had one
 //! listener that drove the toast. There is no listener layer here:
 //! [`Deck::on_clip_saved`] updates the status line directly.
 //!
@@ -109,6 +109,9 @@ pub struct Deck {
     /// `None` = not recording a hotkey. `Some` = waiting for the next chord.
     pub recording_hotkey: Option<HotkeyAction>,
     pub busy: bool,
+    /// Monotonic id for encoder restarts. A completion only clears `busy`
+    /// and writes the status line when it belongs to the newest request.
+    pub restart_seq: u64,
 
     /// Root focus handle. The deck owns focus so `on_key_down` can capture the
     /// next chord while recording a hotkey (a chord must never reach a widget
@@ -176,6 +179,7 @@ impl Deck {
             status: None,
             recording_hotkey: None,
             busy: false,
+            restart_seq: 0,
             focus,
             monitors: state.monitors(),
             update_status: "Not checked yet".to_string(),
@@ -526,10 +530,27 @@ impl Deck {
         let mut topmost_request: Option<bool> = None;
         let mut topmost = |on: bool| topmost_request = Some(on);
 
+        // Capture before `patch` is moved into `update_settings`.
+        let needs_encoder_restart = patch.affects_encoder();
+
         match self.state.update_settings(patch, &mut rebind, &mut topmost) {
             Ok(settings) => {
                 self.settings = settings;
-                self.status_info("Settings saved", "Applied immediately.");
+                if needs_encoder_restart {
+                    if self.state.is_armed() {
+                        // fps/bitrate/codec/monitor/audio are baked into the
+                        // engine at start, so rebuild it rather than letting the
+                        // UI claim they were applied.
+                        self.restart_encoder(cx);
+                    } else {
+                        self.status_info(
+                            "Settings saved",
+                            "Applies the next time the buffer is armed.",
+                        );
+                    }
+                } else {
+                    self.status_info("Settings saved", "Applied immediately.");
+                }
             }
             Err(e) => {
                 // A rejected patch leaves the file and the live hotkey alone;
@@ -544,6 +565,44 @@ impl Deck {
             });
         }
         cx.notify();
+    }
+
+    /// Stops and restarts the capture engine so encoder settings (fps, bitrate,
+    /// codec, rate control, GOP, monitor, audio source) become live. Blocking,
+    /// so it runs on the background executor.
+    fn restart_encoder(&mut self, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.restart_seq = self.restart_seq.wrapping_add(1);
+        let seq = self.restart_seq;
+        self.status_info("Settings saved", "Restarting the encoder…");
+        cx.notify();
+
+        let state = Arc::clone(&self.state);
+        cx.spawn(async move |deck, cx| {
+            let result = cx
+                .background_spawn(async move { state.restart_replay_buffer() })
+                .await;
+            deck.update(cx, |deck, cx| {
+                // A newer restart queued behind this one owns the UI state.
+                if deck.restart_seq != seq {
+                    return;
+                }
+                deck.busy = false;
+                match result {
+                    Ok(stats) => {
+                        deck.stats = stats;
+                        deck.status_info(
+                            "Encoder restarted",
+                            "FPS, bitrate, codec and GOP are live now.",
+                        );
+                    }
+                    Err(e) => deck.status_error("Could not restart the encoder", &e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Steps the bitrate by `delta` kbps, clamping to the numeric range. The
@@ -627,7 +686,7 @@ impl Deck {
                         deck.update_error = false;
                         deck.status_info(
                             "Update available",
-                            &format!("ClipFlow {version} is out — see the Releases page."),
+                            &format!("YAScreenClipper {version} is out — see the Releases page."),
                         );
                     }
                     Err(e) => {

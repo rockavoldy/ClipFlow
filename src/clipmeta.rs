@@ -1,7 +1,7 @@
 //! Per-clip user metadata (favourites + custom tags).
 //!
 //! Clips are plain files on disk, so this data cannot live inside them. It is
-//! kept in a tiny sidecar JSON in the ClipFlow app-data folder, keyed by the
+//! kept in a tiny sidecar JSON in the YAScreenClipper app-data folder, keyed by the
 //! absolute clip path, so it survives restarts and stays 100% local — no
 //! cloud, no account, no telemetry. The gallery scan merges it on every
 //! refresh and prunes entries whose clip has been deleted.
@@ -184,10 +184,10 @@ fn store_path() -> PathBuf {
     #[cfg(windows)]
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata).join("ClipFlow").join("clip_meta.json");
+            return PathBuf::from(appdata).join("YAScreenClipper").join("clip_meta.json");
         }
     }
-    std::env::temp_dir().join("ClipFlow").join("clip_meta.json")
+    std::env::temp_dir().join("YAScreenClipper").join("clip_meta.json")
 }
 
 #[cfg(test)]
@@ -198,7 +198,7 @@ mod tests {
     /// `clip_meta.json`). Unique per test so parallel runs never collide.
     fn store(tag: &str) -> ClipMetaStore {
         let dir = std::env::temp_dir().join(format!(
-            "clipflow-meta-{}-{tag}",
+            "yascreenclipper-meta-{}-{tag}",
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&dir);

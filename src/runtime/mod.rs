@@ -11,5 +11,6 @@
 
 pub mod eco;
 pub mod foreground;
+pub mod gamepad;
 pub mod stats;
 pub mod tray;

@@ -1,5 +1,5 @@
 //! User settings. Stored as a single JSON file next to the executable's
-//! app-data folder. No cloud, no account, no telemetry - ClipFlow never opens
+//! app-data folder. No cloud, no account, no telemetry - YAScreenClipper never opens
 //! an outbound socket.
 
 use std::path::PathBuf;
@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::foreground;
-use crate::media::recorder::{default_output_dir, Codec, RecorderConfig};
+use crate::media::recorder::{default_output_dir, Codec, RateControl, RecorderConfig};
 
 /// One per-game capture preset (ShadowPlay style). Applying a profile copies
 /// its capture values into the global settings; the buffer window applies to
-/// the running engine immediately, fps/bitrate/codec on the next engine start.
+/// the running engine immediately, while fps/bitrate/codec take effect on the
+/// next engine start (the settings panel restarts it automatically).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureProfile {
@@ -41,6 +42,15 @@ pub struct Settings {
     pub target_fps: u32,
     pub bitrate_kbps: u32,
     pub codec: Codec,
+    /// Encoder rate control: CBR (default), VBR, or constant quality (CQ).
+    #[serde(default)]
+    pub rate_control: RateControl,
+    /// Seconds between key frames, 1-10. Longer compresses better.
+    #[serde(default = "default_gop_seconds")]
+    pub gop_seconds: u32,
+    /// CQ target, 1-100 (higher = better/slower). Only used for CQ.
+    #[serde(default = "default_quality_level")]
+    pub quality_level: u32,
     pub monitor_index: u32,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
@@ -63,7 +73,7 @@ pub struct Settings {
     /// When true, the mapped profile follows the game that has focus.
     #[serde(default)]
     pub auto_switch_profiles: bool,
-    /// Launch ClipFlow hidden to tray at Windows sign-in.
+    /// Launch YAScreenClipper hidden to tray at Windows sign-in.
     #[serde(default)]
     pub launch_at_startup: bool,
     /// Delete clips older than N days at launch (0 = keep everything).
@@ -109,6 +119,14 @@ fn default_30() -> u32 {
     30
 }
 
+fn default_gop_seconds() -> u32 {
+    1
+}
+
+fn default_quality_level() -> u32 {
+    80
+}
+
 fn default_4() -> u32 {
     4
 }
@@ -128,6 +146,9 @@ impl Default for Settings {
             target_fps: 60,
             bitrate_kbps: 12_000,
             codec: Codec::H264,
+            rate_control: RateControl::Cbr,
+            gop_seconds: 1,
+            quality_level: 80,
             monitor_index: 0,
             capture_system_audio: true,
             capture_microphone: false,
@@ -244,6 +265,9 @@ impl Settings {
             height: 0,
             bitrate_kbps: self.bitrate_kbps.clamp(1_000, 150_000),
             codec: self.codec,
+            rate_control: self.rate_control,
+            gop_seconds: self.gop_seconds.clamp(1, 10),
+            quality_level: self.quality_level.clamp(1, 100),
             monitor_index: self.monitor_index,
             capture_system_audio: self.capture_system_audio,
             capture_microphone: self.capture_microphone,
@@ -258,17 +282,17 @@ impl Settings {
         #[cfg(windows)]
         {
             if let Ok(appdata) = std::env::var("APPDATA") {
-                return PathBuf::from(appdata).join("ClipFlow").join("settings.json");
+                return PathBuf::from(appdata).join("YAScreenClipper").join("settings.json");
             }
         }
-        std::env::temp_dir().join("ClipFlow").join("settings.json")
+        std::env::temp_dir().join("YAScreenClipper").join("settings.json")
     }
 
     pub fn load() -> Self {
         let path = Self::config_path();
         match std::fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
-                log::warn!("[clipflow] settings parse error ({e}); using defaults");
+                log::warn!("[yascreenclipper] settings parse error ({e}); using defaults");
                 Self::default()
             }),
             Err(_) => Self::default(),

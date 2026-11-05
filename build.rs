@@ -10,7 +10,7 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     if target_os == "windows" {
-        // 1. Media Foundation + DXGI are delay-loaded on purpose: ClipFlow must
+        // 1. Media Foundation + DXGI are delay-loaded on purpose: YAScreenClipper must
         //    still launch on Windows N/KN editions that ship without the media
         //    pack, so we can surface a friendly error instead of a hard loader
         //    failure.
@@ -39,13 +39,13 @@ fn main() {
         //    `/MANIFEST:EMBED` puts two `type:MANIFEST, name:1` resources into
         //    the same binary and the linker dies with
         //      CVTRES : fatal error CVT1100: duplicate resource
-        //    so ClipFlow relies on gpui's manifest alone.
+        //    so YAScreenClipper relies on gpui's manifest alone.
         //
         //    The .rc lives next to the icon: see the comment in
-        //    `icons/clipflow.rc` for why the relative path has to resolve from
+        //    `icons/yascreenclipper.rc` for why the relative path has to resolve from
         //    two different working directories.
         let icon_dir = std::path::Path::new("icons");
-        let rc_file = icon_dir.join("clipflow.rc");
+        let rc_file = icon_dir.join("yascreenclipper.rc");
         println!("cargo:rerun-if-changed={}", rc_file.display());
         println!("cargo:rerun-if-changed=icons/icon.ico");
 

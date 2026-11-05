@@ -3,6 +3,10 @@
 //! `Alt + C`       ➜ flush the rolling buffer to disk (the money shortcut)
 //! `Alt + Shift+C` ➜ arm / disarm the buffer
 //!
+//! Either action can instead be bound to a numbered controller button
+//! (`Pad+0`, `Pad+1`, ...) through [`crate::platform::gamepad`]; the same
+//! `settings.json` fields hold both forms via [`Binding`].
+//!
 //! The OS callback must return in microseconds: it does nothing but push the
 //! action onto a channel, otherwise Windows considers the hook unresponsive and
 //! silently unregisters it mid-game.
@@ -13,6 +17,8 @@
 //! `DispatchMessageW`, so `WM_HOTKEY` is dispatched for it there.
 
 use global_hotkey::hotkey::HotKey;
+
+use crate::platform::gamepad::GamepadButton;
 
 /// Parses a stored accelerator. Kept separate from [`validate`] because
 /// `rebind` needs to inspect the *previous* value without re-validating it: a
@@ -35,6 +41,57 @@ pub fn validate(accelerator: &str) -> Result<HotKey, String> {
         Err(format!(
             "'{accelerator}' needs a modifier (Alt, Ctrl, Shift or Win) — Windows reserves bare keys for typing"
         ))
+    }
+}
+
+/// One stored hotkey value: either a keyboard accelerator or a controller
+/// button. Both share the `settings.json` fields, so a user can rebind an
+/// action from `Alt+C` to `Pad+0` without a settings migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    Keyboard(HotKey),
+    Gamepad(GamepadButton),
+}
+
+impl Binding {
+    /// Parses either form. A `Pad+…` prefix selects the gamepad backend before
+    /// the keyboard parser ever runs, so the two namespaces cannot collide.
+    pub fn parse(accelerator: &str) -> Result<Self, String> {
+        if let Some(button) = GamepadButton::parse(accelerator) {
+            return Ok(Self::Gamepad(button));
+        }
+        validate(accelerator).map(Self::Keyboard)
+    }
+
+    pub fn keyboard_id(self) -> Option<u32> {
+        match self {
+            Self::Keyboard(key) => Some(key.id()),
+            Self::Gamepad(_) => None,
+        }
+    }
+}
+
+/// Same as [`Binding::parse`], spelled for call sites that used [`validate`].
+pub fn validate_binding(accelerator: &str) -> Result<Binding, String> {
+    Binding::parse(accelerator)
+}
+
+/// Canonical form used for conflict checks: `Pad+0` and `pad+button 0` are the
+/// same binding. Keyboard accelerators are left untouched (global-hotkey is
+/// already case-insensitive, and the stored spelling is the user's).
+pub fn normalize_binding(accelerator: &str) -> String {
+    match GamepadButton::parse(accelerator) {
+        Some(button) => button.accelerator(),
+        None => accelerator.to_string(),
+    }
+}
+
+/// Label for the settings badge: "Alt+C" stays as-is, `Pad+0` reads as
+/// "Button 0" instead of exposing the storage format.
+pub fn binding_label(accelerator: &str) -> String {
+    match GamepadButton::parse(accelerator) {
+        Some(button) => button.label(),
+        None => accelerator.to_string(),
     }
 }
 
@@ -183,9 +240,15 @@ mod tests {
             );
         }
         // A real key with no modifier is reserved for typing.
-        assert_eq!(accelerator_from_chord("c", false, false, false, false), None);
+        assert_eq!(
+            accelerator_from_chord("c", false, false, false, false),
+            None
+        );
         // Arrows / media keys are not global-shortcut tokens in this UI.
-        assert_eq!(accelerator_from_chord("left", true, false, false, false), None);
+        assert_eq!(
+            accelerator_from_chord("left", true, false, false, false),
+            None
+        );
         assert_eq!(
             accelerator_from_chord("mediatracknext", true, false, false, false),
             None
@@ -204,6 +267,23 @@ mod tests {
         let formatted = accelerator_from_chord("c", false, true, true, false).unwrap();
         assert_eq!(formatted, "Alt+Shift+C");
         assert!(validate(&formatted).is_ok());
+    }
+
+    #[test]
+    fn a_pad_value_parses_as_a_binding_not_a_keyboard_hotkey() {
+        let binding = validate_binding("Pad+0").unwrap();
+        assert_eq!(binding, Binding::Gamepad(GamepadButton::SOUTH));
+        // The keyboard parser still refuses it: the two namespaces stay
+        // separate even though they share a settings field.
+        assert!(validate("Pad+0").is_err());
+    }
+
+    #[test]
+    fn pad_values_normalise_for_conflict_checks() {
+        assert_eq!(normalize_binding("pad+button 0"), "Pad+0");
+        assert_eq!(normalize_binding("Alt+C"), "Alt+C");
+        assert_eq!(binding_label("Pad+0"), "Button 0");
+        assert_eq!(binding_label("Alt+C"), "Alt+C");
     }
 }
 
@@ -242,26 +322,58 @@ pub fn resolve_or_default(stored: &str, fallback: &str) -> Result<HotKey, String
     match validate(stored) {
         Ok(key) => Ok(key),
         Err(e) => {
-            log::warn!("[clipflow] hotkey '{stored}' unusable: {e}");
+            log::warn!("[yascreenclipper] hotkey '{stored}' unusable: {e}");
             validate(fallback).map_err(|e| e.to_string())
         }
     }
 }
 
-/// Swaps one binding, **registering the new combo before unregistering the old
-/// one** (the ordering inherited from the Tauri build).
+/// [`resolve_or_default`] for a value that may be a keyboard chord or a pad
+/// button. A gamepad value always parses, so a pad-only settings file opens
+/// even when the keyboard parser would reject every string in it.
+pub fn resolve_or_default_binding(stored: &str, fallback: &str) -> Result<Binding, String> {
+    match Binding::parse(stored) {
+        Ok(binding) => Ok(binding),
+        Err(e) => {
+            log::warn!("[yascreenclipper] hotkey '{stored}' unusable: {e}");
+            Binding::parse(fallback).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Swaps one binding, **registering the new keyboard combo before
+/// unregistering the old one** (the ordering inherited from the Tauri build).
 ///
 /// That ordering is what makes a conflict safe: if the new combo is already
 /// owned by another app, `register` fails and the old binding is still live, so
-/// the user is never left with no hotkey at all.
-pub fn swap_binding(registrar: &dyn Registrar, old: HotKey, new: HotKey) -> Result<(), String> {
+/// the user is never left with no hotkey at all. Gamepad bindings have no OS
+/// registration, so moving between them only has to keep the keyboard side
+/// consistent.
+pub fn swap_binding(registrar: &dyn Registrar, old: Binding, new: Binding) -> Result<(), String> {
     if old == new {
         return Ok(()); // no-op; re-registering would fail
     }
-    registrar.register(new)?;
-    // Only now is it safe to drop the old one.
-    if let Err(e) = registrar.unregister(old) {
-        log::warn!("[clipflow] could not unregister the old hotkey: {e}");
+    match (old, new) {
+        (Binding::Keyboard(old), Binding::Keyboard(new)) => {
+            registrar.register(new)?;
+            // Only now is it safe to drop the old one.
+            if let Err(e) = registrar.unregister(old) {
+                log::warn!("[yascreenclipper] could not unregister the old hotkey: {e}");
+            }
+        }
+        (Binding::Keyboard(old), Binding::Gamepad(_)) => {
+            // The pad needs no OS slot, but the old keyboard shortcut must stop
+            // firing because it no longer represents this action.
+            if let Err(e) = registrar.unregister(old) {
+                log::warn!("[yascreenclipper] could not unregister the old hotkey: {e}");
+            }
+        }
+        (Binding::Gamepad(_), Binding::Keyboard(new)) => {
+            // Nothing to release on the pad side; register the keyboard first
+            // so a conflict leaves the old (pad) binding in place.
+            registrar.register(new)?;
+        }
+        (Binding::Gamepad(_), Binding::Gamepad(_)) => {}
     }
     Ok(())
 }
@@ -276,8 +388,8 @@ pub fn swap_binding(registrar: &dyn Registrar, old: HotKey, new: HotKey) -> Resu
 /// OS. See [`Registered::unbound`].
 pub struct Registered {
     manager: Option<global_hotkey::GlobalHotKeyManager>,
-    save: HotKey,
-    toggle: HotKey,
+    save: Binding,
+    toggle: Binding,
 }
 
 #[cfg(all(windows, not(feature = "headless-sim")))]
@@ -290,15 +402,25 @@ impl Registered {
         let manager = global_hotkey::GlobalHotKeyManager::new()
             .map_err(|e| format!("could not create the hotkey manager: {e}"))?;
 
-        let save_key = resolve_or_default(save, "Alt+C")?;
-        let toggle_key = resolve_or_default(toggle, "Alt+Shift+C")?;
+        let save_key = resolve_or_default_binding(save, "Alt+C")?;
+        let toggle_key = resolve_or_default_binding(toggle, "Alt+Shift+C")?;
 
-        Registrar::register(&manager, save_key)
-            .map_err(|e| format!("could not register '{save}': {e}"))?;
-        if let Err(e) = Registrar::register(&manager, toggle_key) {
-            // Roll back the first so we never leave a half-bound state.
-            let _ = Registrar::unregister(&manager, save_key);
-            return Err(format!("could not register '{toggle}': {e}"));
+        // Only keyboard bindings need an OS slot; a pad binding is serviced by
+        // the gamepad drain. Roll back the first registration when the second
+        // is refused so we never leave a half-bound state.
+        let mut registered: Vec<HotKey> = Vec::new();
+        if let Binding::Keyboard(key) = save_key {
+            Registrar::register(&manager, key)
+                .map_err(|e| format!("could not register '{save}': {e}"))?;
+            registered.push(key);
+        }
+        if let Binding::Keyboard(key) = toggle_key {
+            if let Err(e) = Registrar::register(&manager, key) {
+                for old in registered {
+                    let _ = Registrar::unregister(&manager, old);
+                }
+                return Err(format!("could not register '{toggle}': {e}"));
+            }
         }
 
         Ok(Self {
@@ -317,8 +439,8 @@ impl Registered {
     pub fn unbound(save: &str, toggle: &str) -> Result<Self, String> {
         Ok(Self {
             manager: None,
-            save: resolve_or_default(save, "Alt+C")?,
-            toggle: resolve_or_default(toggle, "Alt+Shift+C")?,
+            save: resolve_or_default_binding(save, "Alt+C")?,
+            toggle: resolve_or_default_binding(toggle, "Alt+Shift+C")?,
         })
     }
 
@@ -328,27 +450,38 @@ impl Registered {
         action: crate::ui::deck::HotkeyAction,
         new_accelerator: &str,
     ) -> Result<(), String> {
-        let new_key = validate(new_accelerator)?;
-        let (old_key, slot) = match action {
-            crate::ui::deck::HotkeyAction::Save => (&mut self.save, "save"),
-            crate::ui::deck::HotkeyAction::Toggle => (&mut self.toggle, "toggle"),
+        let new_key = Binding::parse(new_accelerator)?;
+        let old_key = match action {
+            crate::ui::deck::HotkeyAction::Save => &mut self.save,
+            crate::ui::deck::HotkeyAction::Toggle => &mut self.toggle,
         };
 
         if let Some(manager) = self.manager.as_ref() {
             swap_binding(manager, *old_key, new_key)
                 .map_err(|e| format!("'{new_accelerator}' is already in use ({e})"))?;
-            let _ = slot;
         }
         *old_key = new_key;
         Ok(())
     }
 
-    /// Which action a hotkey id maps to, if any.
+    /// Which action a keyboard hotkey id maps to, if any.
     pub fn intent_for(&self, id: u32) -> Option<crate::ui::deck::Intent> {
         use crate::ui::deck::{HotkeyAction, Intent};
-        if id == self.save.id() {
+        if self.save.keyboard_id() == Some(id) {
             Some(Intent::Hotkey(HotkeyAction::Save))
-        } else if id == self.toggle.id() {
+        } else if self.toggle.keyboard_id() == Some(id) {
+            Some(Intent::Hotkey(HotkeyAction::Toggle))
+        } else {
+            None
+        }
+    }
+
+    /// Which action a gamepad button maps to, if any.
+    pub fn intent_for_button(&self, button: GamepadButton) -> Option<crate::ui::deck::Intent> {
+        use crate::ui::deck::{HotkeyAction, Intent};
+        if self.save == Binding::Gamepad(button) {
+            Some(Intent::Hotkey(HotkeyAction::Save))
+        } else if self.toggle == Binding::Gamepad(button) {
             Some(Intent::Hotkey(HotkeyAction::Toggle))
         } else {
             None
@@ -361,16 +494,16 @@ impl Registered {
 /// "invalid shortcut" messages testable everywhere.
 #[cfg(any(not(windows), feature = "headless-sim"))]
 pub struct Registered {
-    save: HotKey,
-    toggle: HotKey,
+    save: Binding,
+    toggle: Binding,
 }
 
 #[cfg(any(not(windows), feature = "headless-sim"))]
 impl Registered {
     pub fn install(save: &str, toggle: &str) -> Result<Self, String> {
         Ok(Self {
-            save: resolve_or_default(save, "Alt+C")?,
-            toggle: resolve_or_default(toggle, "Alt+Shift+C")?,
+            save: resolve_or_default_binding(save, "Alt+C")?,
+            toggle: resolve_or_default_binding(toggle, "Alt+Shift+C")?,
         })
     }
 
@@ -386,7 +519,7 @@ impl Registered {
         action: crate::ui::deck::HotkeyAction,
         new_accelerator: &str,
     ) -> Result<(), String> {
-        let new_key = validate(new_accelerator)?;
+        let new_key = Binding::parse(new_accelerator)?;
         match action {
             crate::ui::deck::HotkeyAction::Save => self.save = new_key,
             crate::ui::deck::HotkeyAction::Toggle => self.toggle = new_key,
@@ -396,9 +529,20 @@ impl Registered {
 
     pub fn intent_for(&self, id: u32) -> Option<crate::ui::deck::Intent> {
         use crate::ui::deck::{HotkeyAction, Intent};
-        if id == self.save.id() {
+        if self.save.keyboard_id() == Some(id) {
             Some(Intent::Hotkey(HotkeyAction::Save))
-        } else if id == self.toggle.id() {
+        } else if self.toggle.keyboard_id() == Some(id) {
+            Some(Intent::Hotkey(HotkeyAction::Toggle))
+        } else {
+            None
+        }
+    }
+
+    pub fn intent_for_button(&self, button: GamepadButton) -> Option<crate::ui::deck::Intent> {
+        use crate::ui::deck::{HotkeyAction, Intent};
+        if self.save == Binding::Gamepad(button) {
+            Some(Intent::Hotkey(HotkeyAction::Save))
+        } else if self.toggle == Binding::Gamepad(button) {
             Some(Intent::Hotkey(HotkeyAction::Toggle))
         } else {
             None
@@ -502,8 +646,8 @@ mod registration_tests {
     #[test]
     fn the_new_combo_is_registered_before_the_old_one_is_released() {
         let recorder = Recorder::default();
-        let old = parse("Alt+C").unwrap();
-        let new = parse("Ctrl+Alt+F9").unwrap();
+        let old = Binding::Keyboard(parse("Alt+C").unwrap());
+        let new = Binding::Keyboard(parse("Ctrl+Alt+F9").unwrap());
 
         swap_binding(&recorder, old, new).unwrap();
         assert_eq!(recorder.calls(), vec!["register", "unregister"]);
@@ -516,11 +660,51 @@ mod registration_tests {
             fail_register: true,
             ..Recorder::default()
         };
-        let old = parse("Alt+C").unwrap();
-        let new = parse("Ctrl+Alt+F9").unwrap();
+        let old = Binding::Keyboard(parse("Alt+C").unwrap());
+        let new = Binding::Keyboard(parse("Ctrl+Alt+F9").unwrap());
 
         let err = swap_binding(&recorder, old, new).unwrap_err();
         assert!(err.contains("combo is taken"), "{err}");
         assert_eq!(recorder.calls(), vec!["register"]);
+    }
+
+    #[test]
+    fn a_pad_binding_never_reaches_the_os_registrar() {
+        let recorder = Recorder::default();
+        let old = Binding::Keyboard(parse("Alt+C").unwrap());
+        let new = Binding::Gamepad(GamepadButton::SOUTH);
+
+        swap_binding(&recorder, old, new).unwrap();
+        // The old keyboard slot is released, but the pad button is not
+        // registered with the global-hotkey manager.
+        assert_eq!(recorder.calls(), vec!["unregister"]);
+    }
+
+    #[test]
+    fn moving_from_a_pad_to_a_keyboard_registers_only_the_keyboard() {
+        let recorder = Recorder::default();
+        let old = Binding::Gamepad(GamepadButton::SOUTH);
+        let new = Binding::Keyboard(parse("Ctrl+Alt+F9").unwrap());
+
+        swap_binding(&recorder, old, new).unwrap();
+        assert_eq!(recorder.calls(), vec!["register"]);
+    }
+
+    #[test]
+    fn a_pad_binding_round_trips_through_the_registry() {
+        let mut reg = Registered::unbound("Pad+0", "Alt+Shift+C").unwrap();
+        assert_eq!(
+            reg.intent_for_button(GamepadButton::SOUTH),
+            Some(Intent::Hotkey(HotkeyAction::Save))
+        );
+        // The old keyboard combo is gone: one action has one binding.
+        assert_eq!(reg.intent_for(parse("Alt+C").unwrap().id()), None);
+
+        reg.rebind(HotkeyAction::Save, "Pad+7").unwrap();
+        assert_eq!(
+            reg.intent_for_button(GamepadButton::RIGHT_TRIGGER),
+            Some(Intent::Hotkey(HotkeyAction::Save))
+        );
+        assert_eq!(reg.intent_for_button(GamepadButton::SOUTH), None);
     }
 }

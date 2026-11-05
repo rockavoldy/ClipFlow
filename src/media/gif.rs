@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn suggested_gif_path_bumps_on_collision() {
-        let dir = std::env::temp_dir().join(format!("clipflow-gif-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("yascreenclipper-gif-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("clutch.mp4");
         assert_eq!(suggested_gif_path(&src), dir.join("clutch_gif.gif"));

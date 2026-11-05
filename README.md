@@ -1,4 +1,4 @@
-# ClipFlow
+# YAScreenClipper
 
 <p align="center">
   <strong>Ultra-Lightweight Instant Replay & Game Clipping Engine for Windows 10/11</strong>
@@ -15,20 +15,16 @@
 
 ---
 
-![ClipFlow Studio](ClipFlow_UI.png)
-
----
-
 ## ⚡ Overview
 
-**ClipFlow** is a zero-bloat, high-performance Instant Replay and Game Clipping desktop app for Windows 10 and 11. 
+**YAScreenClipper** is a zero-bloat, high-performance Instant Replay and Game Clipping desktop app for Windows 10 and 11.
 
-Designed for gamers and creators who demand maximum FPS and instant clipping without background resource hogging, ClipFlow continuously records your active display into a rolling memory buffer directly on your GPU. Pressing `Alt + C` instantly flushes your buffer to an MP4 video file in **under 50 milliseconds**.
+Designed for gamers and creators who demand maximum FPS and instant clipping without background resource hogging, YAScreenClipper continuously records your active display into a rolling memory buffer directly on your GPU. Pressing `Alt + C` instantly flushes your buffer to an MP4 video file in **under 50 milliseconds**.
 
 > ### 🧱 UI rebuilt on GPUI
 > The whole shell moved from **Tauri v2 + React/WebView2** to a **native GPUI**
 > desktop app: one Rust view tree, no WebView2 runtime, no Node build step, and
-> a single self-contained `clipflow.exe`. The capture engine — DXGI Desktop
+> a single self-contained `yascreenclipper.exe`. The capture engine — DXGI Desktop
 > Duplication, the Media Foundation hardware encoder, WASAPI loopback and the
 > rolling ring buffer — is unchanged.
 >
@@ -45,9 +41,9 @@ Designed for gamers and creators who demand maximum FPS and instant clipping wit
 
 ## ✨ Key Features
 
-- **⚡ Sub-50ms Instant Clip Flush:** Snapshot your last 30–120 seconds of gameplay to `%USERPROFILE%\Videos\ClipFlow` in under 50 ms. Zero rendering queues or waiting.
-- **🎮 Per-Game Capture Settings:** Clips are tagged with the foreground game and, optionally, routed into `Videos/ClipFlow/<game>/`, and the last 30 s can be saved automatically when a game exits focus. *(The profile editor UI is deferred; profiles still seed, persist and apply.)*
-- **🏷️ Game-Tagged Clips & Folders:** Every save is tagged with the game in the foreground and (optionally) routed into `Videos/ClipFlow/<game>/`. Auto-save the last 30 s whenever a game exits focus.
+- **⚡ Sub-50ms Instant Clip Flush:** Snapshot your last 30–120 seconds of gameplay to `%USERPROFILE%\Videos\YAScreenClipper` in under 50 ms. Zero rendering queues or waiting.
+- **🎮 Per-Game Capture Settings:** Clips are tagged with the foreground game and, optionally, routed into `Videos/YAScreenClipper/<game>/`, and the last 30 s can be saved automatically when a game exits focus. *(The profile editor UI is deferred; profiles still seed, persist and apply.)*
+- **🏷️ Game-Tagged Clips & Folders:** Every save is tagged with the game in the foreground and (optionally) routed into `Videos/YAScreenClipper/<game>/`. Auto-save the last 30 s whenever a game exits focus.
 - **🔇 Game-Focus Friendly:** Saving with `Alt + C` never steals focus from a fullscreen game — the window stays put and you get a native toast instead. Audio capture retries automatically when a game holds the device in exclusive mode, so clips never come out silent.
 - **⌨️ Fully Customisable Hotkeys:** Rebind save and arm/disarm from the UI — click, press, done. Persisted in one JSON file.
 - **🎞️ H.264 or HEVC (H.265):** Pick your codec; HEVC cuts storage in half while staying fully hardware-accelerated.
@@ -61,11 +57,11 @@ Designed for gamers and creators who demand maximum FPS and instant clipping wit
 
 ---
 
-## ⚔️ Why ClipFlow? (Feature Comparison)
+## ⚔️ Why YAScreenClipper? (Feature Comparison)
 
-ClipFlow was built to eliminate the bloat, mandatory accounts, and high RAM overhead common in modern clipping apps.
+YAScreenClipper was built to eliminate the bloat, mandatory accounts, and high RAM overhead common in modern clipping apps.
 
-| Feature | ⚡ **ClipFlow** | NVIDIA ShadowPlay | Medal.tv | Outplayed / Overwolf | SteelSeries GG | OBS Replay Buffer |
+| Feature | ⚡ **YAScreenClipper** | NVIDIA ShadowPlay | Medal.tv | Outplayed / Overwolf | SteelSeries GG | OBS Replay Buffer |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Mandatory Account / Login** | ❌ **None (0%)** | ⚠️ Required | ⚠️ Required | ⚠️ Required | ⚠️ Required | ❌ None |
 | **RAM Footprint** | ⚡ **< 100 MB** | 🟡 300–600 MB | 🔴 800 MB–1.5 GB | 🔴 1.0–2.0 GB | 🔴 700 MB–1.2 GB | 🟡 400–800 MB |
@@ -80,10 +76,10 @@ ClipFlow was built to eliminate the bloat, mandatory accounts, and high RAM over
 ## 🚀 Quick Start
 
 ### 1. Download & Run
-Choose your preferred flavor from the [Releases](https://github.com/jaimitus/ClipFlow/releases) page:
-- **Standalone Portable:** `ClipFlow_v1.4.2_Portable.exe` (Single executable, no installation needed)
-- **Setup Installer:** `ClipFlow_1.4.2_x64-setup.exe` (NSIS Installer)
-- **MSI Package:** `ClipFlow_1.4.2_x64_en-US.msi` (Windows Installer)
+Choose your preferred flavor from the [Releases](https://github.com/rockavoldy/YAScreenClipper/releases) page:
+- **Standalone Portable:** `YAScreenClipper_v1.4.2_Portable.exe` (Single executable, no installation needed)
+- **Setup Installer:** `YAScreenClipper_1.4.2_x64-setup.exe` (NSIS Installer)
+- **MSI Package:** `YAScreenClipper_1.4.2_x64_en-US.msi` (Windows Installer)
 
 > 💡 All three are the same binary; the installers just add Start-menu shortcuts and the uninstaller.
 
@@ -93,7 +89,7 @@ Choose your preferred flavor from the [Releases](https://github.com/jaimitus/Cli
 - Both hotkeys are **customisable** — Settings → click the badge → press your combo.
 - **Updates:** Settings → About & Updates → `Check for updates` compares your version against the newest release and opens the download page.
 
-Saved clips are stored in `%USERPROFILE%\Videos\ClipFlow` (or `Videos\ClipFlow\<game>\` with *Organise by game*).
+Saved clips are stored in `%USERPROFILE%\Videos\YAScreenClipper` (or `Videos\YAScreenClipper\<game>\` with *Organise by game*).
 
 ---
 
@@ -101,7 +97,7 @@ Saved clips are stored in `%USERPROFILE%\Videos\ClipFlow` (or `Videos\ClipFlow\<
 
 ### Prerequisites
 - [Rust](https://www.rust-lang.org/tools/install) **1.98+** — the GPUI stack
-  uses `Option::map_or_default`, stabilised in Rust 1.98.0 (the ClipFlow crate
+  uses `Option::map_or_default`, stabilised in Rust 1.98.0 (the YAScreenClipper crate
   itself stays on edition 2021)
 - C++ Build Tools for Visual Studio with the Windows 10/11 SDK
 - No Node.js, no WebView2, no Tauri CLI
@@ -110,8 +106,8 @@ Saved clips are stored in `%USERPROFILE%\Videos\ClipFlow` (or `Videos\ClipFlow\<
 
 ```powershell
 # Clone repository
-git clone https://github.com/jaimitus/ClipFlow.git
-cd ClipFlow
+git clone https://github.com/rockavoldy/YAScreenClipper.git
+cd YAScreenClipper
 
 # Build the release binary
 cargo build --release
@@ -121,7 +117,7 @@ cargo install cargo-packager --locked
 cargo packager --release
 ```
 
-The binary lands in `target/release/clipflow.exe`; the installers land next to
+The binary lands in `target/release/yascreenclipper.exe`; the installers land next to
 it. `cargo packager` reads `[package.metadata.packager]` in `Cargo.toml`, so the
 shipped version can never drift from the crate version.
 
@@ -160,5 +156,5 @@ This project is licensed under the [MIT License](LICENSE).
 ---
 
 <p align="center">
-  Developed with ❤️ by <a href="https://github.com/jaimitus">jaimitus</a>. If you find ClipFlow useful, consider <a href="https://buymeacoffee.com/jaimitus">supporting the project</a>!
+  Developed with ❤️ by <a href="https://github.com/jaimitus">jaimitus</a>. If you find YAScreenClipper useful, consider <a href="https://buymeacoffee.com/jaimitus">supporting the project</a>!
 </p>

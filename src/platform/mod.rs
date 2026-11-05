@@ -8,6 +8,7 @@
 
 pub mod autostart;
 pub mod dialog;
+pub mod gamepad;
 pub mod hotkeys;
 pub mod notify;
 pub mod tray;

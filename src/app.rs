@@ -64,11 +64,11 @@ pub fn run() {
                 // fallback bindings are *not* registered with the OS - if the
                 // stored combos were refused, retrying the same default combos
                 // would be refused too, and the app must still open.
-                log::warn!("[clipflow] global hotkeys unavailable: {e}");
+                log::warn!("[yascreenclipper] global hotkeys unavailable: {e}");
                 match Registered::unbound(&settings.hotkey_save, &settings.hotkey_toggle) {
                     Ok(registered) => Arc::new(parking_lot::Mutex::new(registered)),
                     Err(e) => {
-                        log::error!("[clipflow] no usable hotkey bindings: {e}");
+                        log::error!("[yascreenclipper] no usable hotkey bindings: {e}");
                         // Even this cannot fail: `unbound` only parses, and the
                         // defaults are known-good.
                         Arc::new(parking_lot::Mutex::new(
@@ -94,7 +94,7 @@ pub fn run() {
             // minimize / maximize and the window menu, so there is no custom
             // chrome to keep in sync with the platform.
             titlebar: Some(TitlebarOptions {
-                title: Some("ClipFlow".into()),
+                title: Some("YAScreenClipper".into()),
                 ..Default::default()
             }),
             // The deck is a compact single column now that the clip library is
@@ -113,7 +113,7 @@ pub fn run() {
         }) {
             Ok(opened) => opened,
             Err(e) => {
-                log::error!("[clipflow] could not open the deck: {e}");
+                log::error!("[yascreenclipper] could not open the deck: {e}");
                 return;
             }
         };
@@ -181,6 +181,7 @@ pub fn run() {
         crate::runtime::foreground::start(weak.clone(), Arc::clone(&state_for_ui), cx);
         crate::runtime::eco::start(weak.clone(), Arc::clone(&state_for_ui), cx);
         crate::runtime::tray::spawn_hotkeys(weak.clone(), Arc::clone(&hotkeys), cx);
+        crate::runtime::gamepad::start(weak.clone(), cx);
         crate::runtime::tray::spawn_tray(weak.clone(), tray_actions, cx);
 
         // Park the icon (when one was created) in the global so it is not
@@ -217,8 +218,8 @@ fn launch_tasks(state: Arc<AppState>, deck: WeakEntity<Deck>, cx: &mut App) {
                 .background_spawn(async move { state_bg.start_replay_buffer(buffer, fps) })
                 .await;
             match result {
-                Ok(_) => log::info!("[clipflow] buffer armed at launch"),
-                Err(e) => log::warn!("[clipflow] could not arm at launch: {e}"),
+                Ok(_) => log::info!("[yascreenclipper] buffer armed at launch"),
+                Err(e) => log::warn!("[yascreenclipper] could not arm at launch: {e}"),
             }
             // Force a stats refresh so the pill flips to ARMED immediately.
             deck.update(cx, |deck, cx| {
@@ -239,7 +240,7 @@ fn launch_tasks(state: Arc<AppState>, deck: WeakEntity<Deck>, cx: &mut App) {
                 .await;
             if let Ok(n) = deleted {
                 if n > 0 {
-                    log::info!("[clipflow] pruned {n} clips older than {days} days");
+                    log::info!("[yascreenclipper] pruned {n} clips older than {days} days");
                 }
             }
             let _ = cx;
@@ -252,7 +253,7 @@ fn init_logging() {
     // `env_logger` writes to stderr; in a release Windows build there is no
     // console, so the output is discarded harmlessly.
     let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("clipflow=info,warn"),
+        env_logger::Env::default().default_filter_or("yascreenclipper=info,warn"),
     )
     .try_init();
 }

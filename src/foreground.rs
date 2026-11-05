@@ -63,7 +63,7 @@ pub fn foreground_exe() -> Option<String> {
 /// Primary path: a `CreateToolhelp32Snapshot` process list. Snapshotting does
 /// **not** open the target process, so it works for elevated games and
 /// anti-cheat-protected processes that deny `OpenProcess` from a non-elevated
-/// ClipFlow — the classic reason a game was never detected (and, before the
+/// YAScreenClipper — the classic reason a game was never detected (and, before the
 /// privacy-mode fix, why the deck showed "no game focused" mid-match). Falls
 /// back to `OpenProcess` + `QueryFullProcessImageNameW` if the snapshot fails.
 #[cfg(all(windows, not(feature = "headless-sim")))]

@@ -1,6 +1,6 @@
 //! System tray icon + menu.
 //!
-//! The menu is the only way to reach ClipFlow once the deck is hidden to the
+//! The menu is the only way to reach YAScreenClipper once the deck is hidden to the
 //! tray, so it carries the full action set, not just "show window":
 //!
 //! ```text
@@ -8,7 +8,7 @@
 //! Save last 30 s
 //! Arm / disarm       (Alt+Shift+C)
 //! ─────────────
-//! Open ClipFlow
+//! Open YAScreenClipper
 //! Open clips folder
 //! ─────────────
 //! Quit
@@ -92,7 +92,7 @@ pub fn install() -> (Option<Tray>, Receiver<TrayAction>) {
     let save = MenuItem::with_id(ID_SAVE, "Save replay", true, None);
     let save30 = MenuItem::with_id(ID_SAVE_30, "Save last 30 s", true, None);
     let toggle = MenuItem::with_id(ID_TOGGLE, "Arm / disarm", true, None);
-    let show = MenuItem::with_id(ID_SHOW, "Open ClipFlow", true, None);
+    let show = MenuItem::with_id(ID_SHOW, "Open YAScreenClipper", true, None);
     let folder = MenuItem::with_id(ID_FOLDER, "Open clips folder", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
     let sep1 = PredefinedMenuItem::separator();
@@ -100,7 +100,7 @@ pub fn install() -> (Option<Tray>, Receiver<TrayAction>) {
     if let Err(e) = menu.append_items(&[
         &save, &save30, &toggle, &sep1, &show, &folder, &sep2, &quit,
     ]) {
-        log::warn!("[clipflow] tray menu build failed: {e}");
+        log::warn!("[yascreenclipper] tray menu build failed: {e}");
         return (None, actions);
     }
 
@@ -134,20 +134,20 @@ pub fn install() -> (Option<Tray>, Receiver<TrayAction>) {
     let icon = match icon() {
         Ok(icon) => icon,
         Err(e) => {
-            log::warn!("[clipflow] {e}");
+            log::warn!("[yascreenclipper] {e}");
             return (None, actions);
         }
     };
 
     match TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("ClipFlow — instant replay")
+        .with_tooltip("YAScreenClipper — instant replay")
         .with_icon(icon)
         .build()
     {
         Ok(icon) => (Some(Tray { _icon: icon }), actions),
         Err(e) => {
-            log::warn!("[clipflow] tray icon creation failed: {e}");
+            log::warn!("[yascreenclipper] tray icon creation failed: {e}");
             (None, actions)
         }
     }

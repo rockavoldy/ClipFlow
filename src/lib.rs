@@ -1,4 +1,4 @@
-//! ClipFlow — instant replay and game clipping for Windows.
+//! YAScreenClipper — instant replay and game clipping for Windows.
 //!
 //! # Architecture
 //!

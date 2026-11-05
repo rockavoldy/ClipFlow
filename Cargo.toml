@@ -1,10 +1,10 @@
 [package]
-name = "clipflow"
-version = "1.4.2"
-description = "ClipFlow - zero-bloat, privacy-first instant replay & game clipping for Windows"
-authors = ["ClipFlow Contributors"]
+name = "yascreenclipper"
+version = "1.0.0"
+description = "YAScreenClipper - zero-bloat, privacy-first instant replay & game clipping for Windows"
+authors = ["YAScreenClipper Contributors"]
 license = "MIT"
-repository = "https://github.com/clipflow/clipflow"
+repository = "https://github.com/rockavoldy/YAScreenClipper"
 edition = "2021"
 # The GPUI stack needs `Option::map_or_default`, stabilised in Rust 1.98.0, so
 # 1.98 is the real floor - not the 1.85 that edition 2024 alone would imply.
@@ -14,12 +14,12 @@ rust-version = "1.98"
 # `staticlib`/`cdylib` artifacts Tauri needed are gone. `rlib` is kept so the
 # unit tests live in the crate they exercise without a second target.
 [lib]
-name = "clipflow_lib"
+name = "yascreenclipper_lib"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "clipflow"
+name = "yascreenclipper"
 path = "src/main.rs"
 
 [dependencies]
@@ -37,7 +37,6 @@ gpui-kit = "=0.9.0"
 # `DispatchMessageW`, so this thread is pumped for them too.
 tray-icon = "0.26"
 global-hotkey = "0.9"
-
 # ---------------------------------------------------------- Serialization/IO
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
@@ -69,6 +68,11 @@ color_quant = "1.1"
 # Nothing here may hand a typed HWND across that boundary - every entry point
 # in `platform/win32.rs` takes and returns `isize`.
 [target.'cfg(windows)'.dependencies]
+# Gamepad buttons for the global hotkeys. `gilrs` reads controllers through
+# Windows Gaming Input (including raw controllers), so pads Windows does not
+# expose through XInput still work. Windows-only like the rest of the shipping
+# app; every other build uses the stub in `platform::gamepad`.
+gilrs = "0.11.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_DataExchange",
@@ -134,7 +138,7 @@ embed-resource = "3.0.11"
 # Allows `cargo run --features headless-sim` on non-Windows dev machines: the
 # capture engine falls back to a deterministic synthetic pipeline and every
 # UI-side platform module degrades to a stub, so the whole app builds and its
-# policy tests run on macOS/Linux CI.
+# policy tests run without Windows capture hardware.
 default = []
 headless-sim = []
 
@@ -142,9 +146,9 @@ headless-sim = []
 # Packaging (cargo-packager)
 # ---------------------------------------------------------------------------
 # `cargo packager --release` produces:
-#   * ClipFlow_<version>_x64-setup.exe   (NSIS)
-#   * ClipFlow_<version>_x64_en-US.msi   (WiX)
-# and the portable build is `target/release/clipflow.exe` itself.
+#   * YAScreenClipper_<version>_x64-setup.exe   (NSIS)
+#   * YAScreenClipper_<version>_x64_en-US.msi   (WiX)
+# and the portable build is `target/release/yascreenclipper.exe` itself.
 #
 # The config lives here rather than in a standalone `Packager.toml` on purpose:
 # this is the path where cargo-packager fills `name`, `version`, `description`,
@@ -154,10 +158,10 @@ headless-sim = []
 # There is no frontend build step any more, so `before-packaging-command` only
 # has to produce the binary.
 [package.metadata.packager]
-product-name = "ClipFlow"
-identifier = "dev.clipflow.app"
-publisher = "ClipFlow Contributors"
-homepage = "https://github.com/jaimitus/ClipFlow"
+product-name = "YAScreenClipper"
+identifier = "dev.akmd.yascreenclipper"
+publisher = "YAScreenClipper Contributors"
+homepage = "https://github.com/rockavoldy/YAScreenClipper"
 before-packaging-command = "cargo build --release --locked"
 formats = ["nsis", "wix"]
 icons = [
@@ -168,7 +172,7 @@ icons = [
 ]
 
 [[package.metadata.packager.binaries]]
-path = "clipflow"
+path = "yascreenclipper"
 main = true
 
 # The installer's own icon - without it the downloaded `setup.exe` shows the
@@ -180,7 +184,7 @@ installer-icon = "icons/icon.ico"
 incremental = true
 
 [profile.release]
-opt-level = "s"     # size first - ClipFlow ships as a single ~6 MB exe
+opt-level = "s"     # size first - YAScreenClipper ships as a single ~6 MB exe
 lto = true
 codegen-units = 1
 panic = "abort"

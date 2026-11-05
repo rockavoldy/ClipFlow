@@ -13,10 +13,10 @@
 /// Where the manifest lives. Matches the old updater endpoint, so an existing
 /// release pipeline keeps working unchanged.
 pub const LATEST_JSON: &str =
-    "https://github.com/jaimitus/ClipFlow/releases/latest/download/latest.json";
+    "https://github.com/rockavoldy/YAScreenClipper/releases/latest/download/latest.json";
 
 /// The public releases page, opened when the user wants the download.
-pub const RELEASES_PAGE: &str = "https://github.com/jaimitus/ClipFlow/releases";
+pub const RELEASES_PAGE: &str = "https://github.com/rockavoldy/YAScreenClipper/releases";
 
 /// Compares dotted versions numerically. `0.10.0 > 0.9.9`, which a string
 /// comparison gets wrong.
@@ -109,7 +109,7 @@ fn http_get(url: &str) -> Result<String, String> {
         None => (rest, "/"),
     };
 
-    let agent = wide("ClipFlow");
+    let agent = wide("YAScreenClipper");
     let host_w = wide(host);
     let path_w = wide(path);
     let verb = wide("GET");
@@ -249,10 +249,10 @@ mod tests {
     fn the_manifest_endpoint_matches_the_old_updater() {
         // An existing release pipeline publishes here; changing it silently
         // would break update checks for every user.
-        assert!(LATEST_JSON.contains("github.com/jaimitus/ClipFlow/releases/latest/download/latest.json"));
+        assert!(LATEST_JSON.contains("github.com/rockavoldy/YAScreenClipper/releases/latest/download/latest.json"));
         assert_eq!(
             RELEASES_PAGE,
-            "https://github.com/jaimitus/ClipFlow/releases"
+            "https://github.com/rockavoldy/YAScreenClipper/releases"
         );
     }
 }

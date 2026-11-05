@@ -210,7 +210,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn pretty_title(file_name: &str) -> String {
     file_name
         .trim_end_matches(".mp4")
-        .replace("ClipFlow_", "Clip ")
+        .replace("YAScreenClipper_", "Clip ")
         .replace('_', " ")
 }
 
@@ -250,10 +250,10 @@ impl ProbeCache {
         #[cfg(windows)]
         {
             if let Ok(appdata) = std::env::var("APPDATA") {
-                return PathBuf::from(appdata).join("ClipFlow").join("probe_cache.json");
+                return PathBuf::from(appdata).join("YAScreenClipper").join("probe_cache.json");
             }
         }
-        std::env::temp_dir().join("ClipFlow").join("probe_cache.json")
+        std::env::temp_dir().join("YAScreenClipper").join("probe_cache.json")
     }
 
     fn load_from(path: &Path) -> Self {
@@ -787,7 +787,7 @@ mod tests {
     /// Unique temp dir per test process so parallel runs never collide.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clipflow-lib-test-{}-{tag}",
+            "yascreenclipper-lib-test-{}-{tag}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();

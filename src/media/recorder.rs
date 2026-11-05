@@ -1,4 +1,4 @@
-//! ClipFlow capture engine.
+//! YAScreenClipper capture engine.
 //!
 //! Pipeline (all GPU resident, zero CPU readback of pixel data):
 //!
@@ -131,6 +131,45 @@ impl Codec {
     }
 }
 
+/// How the hardware encoder spends the bitrate budget.
+///
+/// The values map 1:1 onto Media Foundation's
+/// `CODECAPI_AVEncCommonRateControlMode`: CBR keeps the ring-buffer memory
+/// ceiling predictable, VBR/Quality trade that predictability for image
+/// quality at the same average bitrate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RateControl {
+    #[default]
+    Cbr,
+    Vbr,
+    /// Constant quality (CQ): the encoder targets [`RecorderConfig::quality_level`]
+    /// instead of an average bitrate.
+    Quality,
+}
+
+impl RateControl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RateControl::Cbr => "CBR",
+            RateControl::Vbr => "VBR",
+            RateControl::Quality => "CQ",
+        }
+    }
+
+    /// `eAVEncCommonRateControlMode_*` from `codecapi.h`.
+    #[cfg_attr(any(not(windows), feature = "headless-sim"), allow(dead_code))]
+    fn codec_mode(self) -> u32 {
+        match self {
+            RateControl::Cbr => 0,
+            // Peak-constrained VBR: the configured bitrate is an average with a
+            // bounded peak, which keeps the ring cap honest.
+            RateControl::Vbr => 1,
+            RateControl::Quality => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecorderConfig {
     pub buffer_seconds: u32,
@@ -140,6 +179,12 @@ pub struct RecorderConfig {
     pub height: u32,
     pub bitrate_kbps: u32,
     pub codec: Codec,
+    pub rate_control: RateControl,
+    /// Seconds between key frames. Longer GOPs compress better but make short
+    /// clips start later (a clip always begins on a key frame).
+    pub gop_seconds: u32,
+    /// CQ target (1-100, higher is better), only used by [`RateControl::Quality`].
+    pub quality_level: u32,
     pub monitor_index: u32,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
@@ -161,6 +206,9 @@ impl Default for RecorderConfig {
             height: 0,
             bitrate_kbps: 12_000,
             codec: Codec::H264,
+            rate_control: RateControl::Cbr,
+            gop_seconds: 1,
+            quality_level: 80,
             monitor_index: 0,
             capture_system_audio: true,
             capture_microphone: false,
@@ -542,7 +590,7 @@ impl SharedState {
 
     fn fail(&self, msg: impl Into<String>) {
         let msg = msg.into();
-        log::error!("[clipflow::recorder] {msg}");
+        log::error!("[yascreenclipper::recorder] {msg}");
         *self.last_error.write() = Some(msg);
         self.set_state(EngineState::Error);
     }
@@ -559,10 +607,10 @@ pub fn default_output_dir() -> PathBuf {
     #[cfg(windows)]
     {
         if let Ok(profile) = std::env::var("USERPROFILE") {
-            return PathBuf::from(profile).join("Videos").join("ClipFlow");
+            return PathBuf::from(profile).join("Videos").join("YAScreenClipper");
         }
     }
-    std::env::temp_dir().join("ClipFlow")
+    std::env::temp_dir().join("YAScreenClipper")
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +767,7 @@ impl CaptureEngine {
                 Err(e) => {
                     *self.audio_error.lock() =
                         Some(format!("audio thread could not start: {e}"));
-                    log::warn!("[clipflow::audio] disabled: {e}");
+                    log::warn!("[yascreenclipper::audio] disabled: {e}");
                 }
             }
         } else {
@@ -730,7 +778,7 @@ impl CaptureEngine {
         let fmt = Arc::clone(&self.video_format);
         let thread_cfg = cfg.clone();
         let handle = std::thread::Builder::new()
-            .name("clipflow-capture".into())
+            .name("yascreenclipper-capture".into())
             .spawn(move || {
                 // The capture thread must never be starved by the game, but it
                 // must also never starve the game: "above normal" is the sweet
@@ -845,7 +893,7 @@ impl CaptureEngine {
         self.shared.set_state(EngineState::Flushing);
 
         let file_name = format!(
-            "ClipFlow_{}.mp4",
+            "YAScreenClipper_{}.mp4",
             chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
         );
         let out_dir = match &cfg.output_subfolder {
@@ -1090,7 +1138,7 @@ mod win {
             let duplication = output1.DuplicateOutput(&device).map_err(|e| {
                 if e.code() == DXGI_ERROR_UNSUPPORTED {
                     RecorderError::Other(
-                        "Desktop Duplication is unavailable on this output (hybrid-GPU: run ClipFlow on the GPU driving the display)".into(),
+                        "Desktop Duplication is unavailable on this output (hybrid-GPU: run YAScreenClipper on the GPU driving the display)".into(),
                     )
                 } else {
                     hr(e)
@@ -1434,7 +1482,7 @@ float4 PSMain(VSOut i) : SV_Target {
             let result = D3DCompile(
                 source.as_ptr() as *const core::ffi::c_void,
                 source.len(),
-                windows::core::PCSTR(c"clipflow".as_ptr() as *const u8),
+                windows::core::PCSTR(c"yascreenclipper".as_ptr() as *const u8),
                 None,
                 None::<&ID3DInclude>,
                 windows::core::PCSTR(entry_c.as_ptr() as *const u8),
@@ -1620,6 +1668,9 @@ float4 PSMain(VSOut i) : SV_Target {
             fps: u32,
             bitrate_kbps: u32,
             codec: Codec,
+            rate_control: RateControl,
+            gop_seconds: u32,
+            quality_level: u32,
             adapter_name: &str,
             vram_mb: u64,
         ) -> RResult<Self> {
@@ -1679,7 +1730,7 @@ float4 PSMain(VSOut i) : SV_Target {
                     ));
                 }
 
-                // 2. Software fallback keeps ClipFlow usable on old iGPUs; it is
+                // 2. Software fallback keeps YAScreenClipper usable on old iGPUs; it is
                 //    clearly reported to the UI so the user knows why the CPU is busy.
                 let (transform, friendly, hardware) = match chosen {
                     Some((act, name)) => {
@@ -1748,8 +1799,11 @@ float4 PSMain(VSOut i) : SV_Target {
                         .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
                         .map_err(hr)?;
                 }
-                // 1 key frame per second: fine-grained ring eviction + fast seek.
-                let _ = out_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps);
+                // Key-frame cadence: longer GOPs compress better, but a flush
+                // always starts on a key frame, so the clip can begin up to
+                // `gop_seconds` after the requested window start.
+                let gop_frames = fps.saturating_mul(gop_seconds.clamp(1, 10)).max(1);
+                let _ = out_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, gop_frames);
                 transform.SetOutputType(0, &out_type, 0).map_err(hr)?;
 
                 // 6. Input type: NV12 straight from the video processor.
@@ -1771,17 +1825,32 @@ float4 PSMain(VSOut i) : SV_Target {
                 set_attr_ratio(&in_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
                 transform.SetInputType(0, &in_type, 0).map_err(hr)?;
 
-                // 7. Rate control - CBR keeps VBV predictable, which keeps the
-                //    ring buffer's memory ceiling predictable.
+                // 7. Rate control. CBR keeps VBV predictable (and therefore the
+                //    ring buffer's memory ceiling); VBR and CQ trade some of that
+                //    predictability for image quality at the same bitrate.
                 if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
-                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncCommonRateControlMode, 0);
+                    let _ = set_codec_u32(
+                        &codec_api,
+                        &CODECAPI_AVEncCommonRateControlMode,
+                        rate_control.codec_mode(),
+                    );
                     let _ = set_codec_u32(
                         &codec_api,
                         &CODECAPI_AVEncCommonMeanBitRate,
                         bitrate_kbps * 1000,
                     );
+                    if rate_control == RateControl::Quality {
+                        // `CODECAPI_AVEncCommonQuality` is the CQ target: higher
+                        // is better/slower. Without it CQ would use the driver's
+                        // own default and ignore the user's choice.
+                        let _ = set_codec_u32(
+                            &codec_api,
+                            &CODECAPI_AVEncCommonQuality,
+                            quality_level.clamp(1, 100),
+                        );
+                    }
                     let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncCommonLowLatency, 1);
-                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, fps);
+                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, gop_frames);
                     let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncVideoMaxNumRefFrame, 1);
                 }
 
@@ -2368,6 +2437,9 @@ float4 PSMain(VSOut i) : SV_Target {
                 cfg.target_fps,
                 cfg.bitrate_kbps,
                 cfg.codec,
+                cfg.rate_control,
+                cfg.gop_seconds,
+                cfg.quality_level,
                 &gfx.adapter_name,
                 gfx.vram_mb,
             ) {
@@ -2404,7 +2476,7 @@ float4 PSMain(VSOut i) : SV_Target {
                 }
 
                 if shared.force_device_reset.swap(false, Ordering::AcqRel) {
-                    log::warn!("[clipflow] simulated device reset requested via IPC");
+                    log::warn!("[yascreenclipper] simulated device reset requested via IPC");
                     shared.device_resets.fetch_add(1, Ordering::Relaxed);
                     shared.generation.fetch_add(1, Ordering::AcqRel);
                     shared.set_state(EngineState::Recovering);
@@ -2463,7 +2535,7 @@ float4 PSMain(VSOut i) : SV_Target {
                                     texture = Some(t);
                                 }
                                 Err(e) => {
-                                    log::warn!("[clipflow] frame cast failed: {e}");
+                                    log::warn!("[yascreenclipper] frame cast failed: {e}");
                                 }
                             }
                         }
@@ -2474,7 +2546,7 @@ float4 PSMain(VSOut i) : SV_Target {
                         texture = last_texture.clone();
                     }
                     Err(e) if is_device_lost(&e) => {
-                        log::warn!("[clipflow] device lost during acquire: {e}");
+                        log::warn!("[yascreenclipper] device lost during acquire: {e}");
                         let _ = unsafe { gfx.duplication.ReleaseFrame() };
                         shared.device_resets.fetch_add(1, Ordering::Relaxed);
                         shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -2488,7 +2560,7 @@ float4 PSMain(VSOut i) : SV_Target {
                         continue 'outer;
                     }
                     Err(e) => {
-                        log::warn!("[clipflow] acquire error: {e}");
+                        log::warn!("[yascreenclipper] acquire error: {e}");
                         shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                         let _ = unsafe { gfx.duplication.ReleaseFrame() };
                         continue;
@@ -2532,7 +2604,7 @@ float4 PSMain(VSOut i) : SV_Target {
 
                         let conv = converter.as_ref().expect("converter built above");
                         if let Err(e) = conv.convert(tex) {
-                            log::warn!("[clipflow] color convert failed: {e}");
+                            log::warn!("[yascreenclipper] color convert failed: {e}");
                             shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
 
                             // Last-resort recovery: the surface changed while we
@@ -2559,7 +2631,7 @@ float4 PSMain(VSOut i) : SV_Target {
                         let encode_start = Instant::now();
 
                         if let Err(e) = encoder.submit(&conv.nv12, pts, frame_hns, force_key) {
-                            log::warn!("[clipflow] encoder submit failed: {e}");
+                            log::warn!("[yascreenclipper] encoder submit failed: {e}");
                             shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                         } else {
                             force_key = false;
@@ -2579,7 +2651,7 @@ float4 PSMain(VSOut i) : SV_Target {
                         });
 
                         if let Err(e) = drain {
-                            log::warn!("[clipflow] encoder drain failed: {e}");
+                            log::warn!("[yascreenclipper] encoder drain failed: {e}");
                         }
 
                         shared.frames_encoded.fetch_add(1, Ordering::Relaxed);

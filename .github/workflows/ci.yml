@@ -6,6 +6,11 @@ name: CI
 # There is no frontend any more: the Tauri shell and the React app are gone and
 # the UI is Rust (GPUI), so "typecheck + tests + build" is now
 # "cargo check + cargo test + cargo clippy".
+#
+# Windows is the only shipping target, so Windows is the only CI target: the
+# real DXGI / Media Foundation / WASAPI engine compiles here, and the GPUI
+# Windows backend (plus the HLSL shader compilation in gpui-pre-windows' build
+# script) is exercised.
 
 on:
   pull_request:
@@ -24,50 +29,11 @@ env:
 
 jobs:
   check:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Windows is the shipping target: the real DXGI / Media Foundation /
-          # WASAPI engine compiles here, and the GPUI Windows backend (plus the
-          # HLSL shader compilation in gpui-pre-windows' build script) is
-          # exercised.
-          - name: Windows · engine
-            os: windows-latest
-            features: ""
-          # Everywhere else the engine falls back to its synthetic backend and
-          # every platform module degrades to a stub, so the UI, the settings
-          # model and all policy tests still compile and run.
-          - name: macOS · headless-sim
-            os: macos-latest
-            features: "--features headless-sim"
-          - name: Linux · headless-sim
-            os: ubuntu-latest
-            features: "--features headless-sim"
+    name: Windows
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # gpui's Linux backend links against X11/Wayland/fontconfig.
-      - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libfreetype6-dev \
-            libssl-dev \
-            libudev-dev \
-            libwayland-dev \
-            libx11-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            cmake \
-            pkg-config
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -85,7 +51,6 @@ jobs:
       # fxc.exe" panic into an actionable message, and pinning the path makes
       # the build independent of that lookup.
       - name: Locate fxc.exe (Windows HLSL compiler)
-        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           $fxc = $null
@@ -113,16 +78,16 @@ jobs:
           }
 
       - name: Check
-        run: cargo check --all-targets ${{ matrix.features }}
+        run: cargo check --all-targets
 
       - name: Unit tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test
 
       - name: Clippy
-        run: cargo clippy --all-targets ${{ matrix.features }}
+        run: cargo clippy --all-targets
 
       # The release profile is what ships (`opt-level = "s"`, `lto`,
       # `panic = "abort"`), and the Windows release build compiles gpui's HLSL
       # shaders, so it is checked here rather than only on a tag.
       - name: Check release profile
-        run: cargo check --release ${{ matrix.features }}
+        run: cargo check --release
